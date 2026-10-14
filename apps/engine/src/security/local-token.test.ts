@@ -3,7 +3,12 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getOrCreateLocalToken, TOKEN_FILE_NAME, tokensMatch } from './local-token.ts'
+import {
+  getOrCreateLocalToken,
+  restrictDataDir,
+  TOKEN_FILE_NAME,
+  tokensMatch,
+} from './local-token.ts'
 
 const FAKE_SID = 'S-1-5-21-1111111111-2222222222-3333333333-1001'
 const BASE64URL_43 = /^[A-Za-z0-9_-]{43}$/
@@ -329,5 +334,142 @@ describe('getOrCreateLocalToken (ACL real en Windows)', () => {
     expect(b).toBe(a)
     expect(fs.readFileSync(path.join(dir, TOKEN_FILE_NAME), 'utf8')).toBe(a)
     expect(aclEntries(path.join(dir, TOKEN_FILE_NAME))).toHaveLength(1)
+  })
+})
+
+describe('restrictDataDir (Windows, exec inyectado)', () => {
+  const sys32 = (exe: string) =>
+    path.win32.join(process.env.SystemRoot ?? process.env.windir ?? 'C:\\Windows', 'System32', exe)
+
+  it('whoami + icacls por ruta absoluta de System32, con (OI)(CI)F y sin shell', () => {
+    const target = path.join(dir, 'datos')
+    const { exec, calls } = fakeExec()
+    restrictDataDir(target, { platform: 'win32', exec })
+
+    expect(fs.statSync(target).isDirectory()).toBe(true)
+    expect(calls).toHaveLength(2)
+    const [who, acl] = calls
+    expect(who?.file).toBe(sys32('whoami.exe'))
+    expect(who?.args).toEqual(['/user', '/fo', 'csv', '/nh'])
+    expect(acl?.file).toBe(sys32('icacls.exe'))
+    expect(path.win32.isAbsolute(acl?.file ?? '')).toBe(true)
+    expect(acl?.args).toEqual([
+      path.resolve(target),
+      '/inheritance:r',
+      '/grant:r',
+      `*${FAKE_SID}:(OI)(CI)F`,
+      '/remove:g',
+      '*S-1-1-0',
+      '*S-1-5-11',
+      '*S-1-5-32-545',
+    ])
+    // Sin shell: cada argumento es un elemento propio, nada de una línea de comandos.
+    expect(acl?.args.every((a) => !/[&|;<>]/.test(a))).toBe(true)
+  })
+
+  it('el permiso del directorio hereda a hijos; el del archivo del token no', () => {
+    const { exec, calls } = fakeExec()
+    restrictDataDir(dir, { platform: 'win32', exec })
+    getOrCreateLocalToken(dir, { platform: 'win32', exec })
+    const grants = calls.filter((c) => c.args.includes('/grant:r')).map((c) => c.args[3])
+    expect(grants).toEqual([`*${FAKE_SID}:(OI)(CI)F`, `*${FAKE_SID}:F`])
+  })
+
+  it('crea la carpeta (con padres) si no existe', () => {
+    const nested = path.join(dir, 'a', 'b')
+    restrictDataDir(nested, { platform: 'win32', exec: fakeExec().exec })
+    expect(fs.statSync(nested).isDirectory()).toBe(true)
+  })
+
+  it('si icacls falla: no lanza y avisa una vez sin datos sensibles', () => {
+    const warnings: string[] = []
+    const exec = (file: string): string => {
+      if (path.win32.basename(file).toLowerCase() === 'whoami.exe') return `"x\\y","${FAKE_SID}"`
+      throw Object.assign(new Error(`Command failed: ${FAKE_SID} secreto`), { status: 5 })
+    }
+    expect(() =>
+      restrictDataDir(dir, { platform: 'win32', exec, onWarning: (m) => warnings.push(m) }),
+    ).not.toThrow()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('5')
+    expect(warnings[0]).not.toContain(FAKE_SID)
+    expect(warnings[0]).not.toContain('secreto')
+  })
+
+  it('si whoami falla: no lanza, no llama a icacls y avisa', () => {
+    const warnings: string[] = []
+    const exec = vi.fn((_file: string): string => {
+      throw Object.assign(new Error('boom'), { status: 1 })
+    })
+    expect(() =>
+      restrictDataDir(dir, { platform: 'win32', exec, onWarning: (m) => warnings.push(m) }),
+    ).not.toThrow()
+    expect(exec).toHaveBeenCalledTimes(1)
+    expect(warnings).toHaveLength(1)
+  })
+
+  it('sin onWarning tampoco lanza', () => {
+    const exec = (): string => {
+      throw new Error('x')
+    }
+    expect(() => restrictDataDir(dir, { platform: 'win32', exec })).not.toThrow()
+  })
+
+  it('en POSIX no ejecuta comandos externos', () => {
+    const exec = vi.fn((_file: string): string => '')
+    restrictDataDir(path.join(dir, 'p'), { platform: 'linux', exec })
+    expect(exec).not.toHaveBeenCalled()
+  })
+})
+
+describe('restrictDataDir (ACL real en Windows)', () => {
+  const icacls = path.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe')
+
+  function aclEntries(target: string): string[] {
+    const out = execFileSync(icacls, [target], { encoding: 'utf8', windowsHide: true })
+    return out
+      .split(/\r?\n/)
+      .map((l) => l.replace(target, '').trim())
+      .filter((l) => /:\(/.test(l))
+  }
+
+  it.runIf(IS_WIN)(
+    'la carpeta queda sin herencia con una sola entrada del usuario y los hijos la heredan',
+    () => {
+      const data = path.join(dir, 'datos')
+      const warnings: string[] = []
+      restrictDataDir(data, { onWarning: (m) => warnings.push(m) })
+      expect(warnings).toEqual([])
+
+      const dirEntries = aclEntries(data)
+      expect(dirEntries).toHaveLength(1)
+      expect(dirEntries.some((e) => e.includes('(I)'))).toBe(false)
+      expect(dirEntries[0]?.toLowerCase()).toContain(os.userInfo().username.toLowerCase())
+      expect(dirEntries[0]).toContain('(OI)')
+      expect(dirEntries[0]).toContain('(CI)')
+      expect(dirEntries[0]).toContain('(F)')
+
+      // Un archivo creado después hereda solo esa entrada.
+      const child = path.join(data, 'data.db')
+      fs.writeFileSync(child, 'x')
+      const childEntries = aclEntries(child)
+      expect(childEntries).toHaveLength(1)
+      expect(childEntries[0]).toContain('(I)')
+      expect(childEntries[0]?.toLowerCase()).toContain(os.userInfo().username.toLowerCase())
+
+      // También una subcarpeta nueva hereda solo la entrada del usuario.
+      const sub = path.join(data, 'sub')
+      fs.mkdirSync(sub)
+      expect(aclEntries(sub)).toHaveLength(1)
+    },
+  )
+
+  it.runIf(IS_WIN)('es idempotente y el propietario sigue pudiendo leer y escribir', () => {
+    const data = path.join(dir, 'datos2')
+    restrictDataDir(data)
+    restrictDataDir(data)
+    expect(aclEntries(data)).toHaveLength(1)
+    fs.writeFileSync(path.join(data, 'f.txt'), 'ok')
+    expect(fs.readFileSync(path.join(data, 'f.txt'), 'utf8')).toBe('ok')
   })
 })

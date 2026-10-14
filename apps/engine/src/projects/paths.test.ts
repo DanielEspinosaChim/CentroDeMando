@@ -3,7 +3,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { ValidationError } from '../errors/index.ts'
-import { assertCwdInProject, isInside, resolveProjectPath } from './paths.ts'
+import {
+  assertCwdInProject,
+  isInside,
+  isUncPath,
+  resolveProjectPath,
+  revalidateProjectPath,
+} from './paths.ts'
 
 let root: string
 let project: string
@@ -86,5 +92,67 @@ describe('isInside', () => {
   it('distingue mayúsculas solo fuera de Windows', () => {
     const upper = project.toUpperCase()
     expect(isInside(project, upper)).toBe(process.platform === 'win32')
+  })
+})
+
+const UNC_PATHS = [
+  '\\\\localhost\\C$\\Users',
+  '\\\\127.0.0.1\\C$\\Users\\alguien',
+  '//servidor/x',
+  '\\\\?\\C:\\Users',
+  '\\\\.\\C:\\Users',
+  '\\\\servidor\\recurso',
+  '\\/servidor/x',
+]
+
+describe('rutas UNC y de dispositivo', () => {
+  it.each(UNC_PATHS)('isUncPath(%s) es true', (p) => expect(isUncPath(p)).toBe(true))
+
+  it('isUncPath no marca rutas locales', () => {
+    expect(isUncPath(project)).toBe(false)
+    expect(isUncPath('C:\\Users')).toBe(false)
+    expect(isUncPath('/home/x')).toBe(false)
+  })
+
+  it.each(UNC_PATHS)('resolveProjectPath rechaza %s al registrar', (p) => {
+    expect(() => resolveProjectPath(p)).toThrow(ValidationError)
+    expect(() => resolveProjectPath(p)).toThrow(/UNC/)
+  })
+
+  it.each(UNC_PATHS)('assertCwdInProject rechaza %s como cwd', (p) => {
+    expect(() => assertCwdInProject(project, p)).toThrow(/UNC/)
+  })
+
+  it.each(UNC_PATHS)('assertCwdInProject rechaza %s como ruta del proyecto', (p) => {
+    expect(() => assertCwdInProject(p)).toThrow(/UNC/)
+  })
+
+  it('revalidateProjectPath rechaza UNC guardadas', () => {
+    expect(() => revalidateProjectPath('\\\\localhost\\C$\\Users')).toThrow(/no válido.*UNC/)
+  })
+})
+
+describe('revalidateProjectPath', () => {
+  it('acepta una ruta real guardada y la devuelve', () => {
+    expect(revalidateProjectPath(fs.realpathSync.native(project))).toBe(
+      fs.realpathSync.native(project),
+    )
+  })
+
+  it('rechaza raíz, carpeta de usuario y contenedor de dataDir', () => {
+    expect(() => revalidateProjectPath(path.parse(root).root)).toThrow(/no válido/)
+    expect(() => revalidateProjectPath(project, { homeDir: project })).toThrow(/usuario/)
+    const dataDir = path.join(outside, 'datos-reval')
+    fs.mkdirSync(dataDir, { recursive: true })
+    expect(() => revalidateProjectPath(outside, { dataDir })).toThrow(/datos/)
+  })
+
+  it('rechaza una ruta no canónica (su ruta real cambió desde el registro)', () => {
+    // `enlace-dentro` resuelve a `src`: la ruta guardada no coincide con la real.
+    expect(() => revalidateProjectPath(path.join(project, 'enlace-dentro'))).toThrow(/cambió/)
+  })
+
+  it('rechaza una carpeta que ya no existe', () => {
+    expect(() => revalidateProjectPath(path.join(root, 'no-existe'))).toThrow(ValidationError)
   })
 })

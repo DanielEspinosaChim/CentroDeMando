@@ -164,13 +164,39 @@ describe('Rate limit por agente (acciones)', () => {
     expect(ctx.runner.calls).toHaveLength(0)
   })
 
-  it('pause, resume y stop comparten el cupo del agente', async () => {
+  it('tasks y resume comparten el cupo del agente', async () => {
     ctx = await start({ actions: 3 })
     const id = await newAgent(ctx, await newProject(ctx), 'A')
-    await ctx.http('POST', `/agents/${id}/pause`)
-    await ctx.http('POST', `/agents/${id}/resume`, {})
-    await ctx.http('POST', `/agents/${id}/stop`)
-    expectRateLimited(await ctx.http('POST', `/agents/${id}/stop`))
+    // Cuerpos/estados que no lanzan nada igualmente consumen cupo: el límite corre antes.
+    expect((await ctx.http('POST', `/agents/${id}/tasks`, {})).status).toBe(400)
+    expect((await ctx.http('POST', `/agents/${id}/resume`, {})).status).toBe(409)
+    expect((await ctx.http('POST', `/agents/${id}/tasks`, {})).status).toBe(400)
+    expectRateLimited(await ctx.http('POST', `/agents/${id}/resume`, {}))
+    expectRateLimited(await ctx.http('POST', `/agents/${id}/tasks`, { prompt: 'x' }))
+    expect(ctx.runner.calls).toHaveLength(0)
+  })
+
+  it('pause y stop nunca se limitan: detener siempre está disponible', async () => {
+    ctx = await start({ actions: 2 })
+    const id = await newAgent(ctx, await newProject(ctx), 'A')
+    for (let i = 0; i < 2; i++) await ctx.http('POST', `/agents/${id}/tasks`, {})
+    expectRateLimited(await ctx.http('POST', `/agents/${id}/tasks`, {}))
+    expectRateLimited(await ctx.http('POST', `/agents/${id}/resume`, {}))
+    for (let i = 0; i < 5; i++) {
+      // Agente ocioso: 409 (conflicto), nunca 429.
+      expect((await ctx.http('POST', `/agents/${id}/stop`)).status).toBe(409)
+      expect((await ctx.http('POST', `/agents/${id}/pause`)).status).toBe(409)
+    }
+  })
+
+  it('stop detiene una tarea viva aunque el cupo esté agotado', async () => {
+    ctx = await start({ actions: 1 }, [{ type: 'hold' }])
+    const id = await newAgent(ctx, await newProject(ctx), 'A')
+    expect((await ctx.http('POST', `/agents/${id}/tasks`, { prompt: 'x' })).status).toBe(202)
+    expectRateLimited(await ctx.http('POST', `/agents/${id}/tasks`, { prompt: 'y' }))
+    const stopped = await ctx.http('POST', `/agents/${id}/stop`)
+    expect(stopped.status).toBe(200)
+    expect(stopped.body.agent.status).toBe('stopped')
   })
 
   it('es independiente entre agentes', async () => {
@@ -178,18 +204,18 @@ describe('Rate limit por agente (acciones)', () => {
     const projectId = await newProject(ctx)
     const a = await newAgent(ctx, projectId, 'A')
     const b = await newAgent(ctx, projectId, 'B')
-    await ctx.http('POST', `/agents/${a}/stop`)
-    await ctx.http('POST', `/agents/${a}/stop`)
-    expectRateLimited(await ctx.http('POST', `/agents/${a}/stop`))
-    expect((await ctx.http('POST', `/agents/${b}/stop`)).status).not.toBe(429)
-    expect((await ctx.http('POST', `/agents/${b}/stop`)).status).not.toBe(429)
-    expectRateLimited(await ctx.http('POST', `/agents/${b}/stop`))
+    await ctx.http('POST', `/agents/${a}/tasks`, {})
+    await ctx.http('POST', `/agents/${a}/tasks`, {})
+    expectRateLimited(await ctx.http('POST', `/agents/${a}/tasks`, {}))
+    expect((await ctx.http('POST', `/agents/${b}/tasks`, {})).status).toBe(400)
+    expect((await ctx.http('POST', `/agents/${b}/tasks`, {})).status).toBe(400)
+    expectRateLimited(await ctx.http('POST', `/agents/${b}/tasks`, {}))
   })
 
   it('las acciones de agente no consumen el cupo general y viceversa', async () => {
     ctx = await start({ actions: 100, writes: 2 })
     const id = await newAgent(ctx, await newProject(ctx), 'A')
-    for (let i = 0; i < 5; i++) await ctx.http('POST', `/agents/${id}/stop`)
+    for (let i = 0; i < 5; i++) await ctx.http('POST', `/agents/${id}/tasks`, {})
     expectRateLimited(await ctx.http('POST', '/projects', {}))
   })
 
@@ -212,10 +238,10 @@ describe('Rate limit por agente (acciones)', () => {
   it('se recupera tras la ventana con el reloj falso', async () => {
     ctx = await start({ actions: 1 })
     const id = await newAgent(ctx, await newProject(ctx), 'A')
-    expect((await ctx.http('POST', `/agents/${id}/stop`)).status).not.toBe(429)
-    expectRateLimited(await ctx.http('POST', `/agents/${id}/stop`))
+    expect((await ctx.http('POST', `/agents/${id}/tasks`, {})).status).toBe(400)
+    expectRateLimited(await ctx.http('POST', `/agents/${id}/tasks`, {}))
     ctx.advance(60_000)
-    expect((await ctx.http('POST', `/agents/${id}/stop`)).status).not.toBe(429)
+    expect((await ctx.http('POST', `/agents/${id}/tasks`, {})).status).toBe(400)
   })
 })
 

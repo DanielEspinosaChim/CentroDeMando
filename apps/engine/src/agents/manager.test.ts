@@ -46,6 +46,7 @@ describe('AgentManager', () => {
   beforeEach(() => {
     store = createStore(openDb(':memory:').db)
     runner = new FakeAgentRunner()
+    const dataDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cdm-mgr-data-')))
     const hub = new EventHub()
     events = []
     hub.subscribe('local', (e) => events.push(e))
@@ -53,7 +54,7 @@ describe('AgentManager', () => {
       store,
       runner,
       hub,
-      config: { maxConcurrentAgents: 5, maxTurns: 7, maxCostUsdPerTask: 1.5 },
+      config: { maxConcurrentAgents: 5, maxTurns: 7, maxCostUsdPerTask: 1.5, dataDir },
       logger: silentLogger,
     })
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdm-mgr-'))
