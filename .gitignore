@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+coverage/
+playwright-report/
+test-results/
+.DS_Store
+
+# Claude Code local
+.claude/settings.local.json
