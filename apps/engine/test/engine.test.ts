@@ -29,14 +29,14 @@ const statuses = (events: EngineEvent[], runId: string) =>
   events.filter((e) => e.runId === runId && e.type === 'agent.status').map((e) => (e as any).status)
 
 describe('Control de acceso (criterios 1 y 2)', () => {
-  it('GET /health responde sin token y sin datos internos', async () => {
+  it('C001-1 GET /health responde sin token y sin datos internos', async () => {
     engine = await startTestEngine({ runner: new FakeAgentRunner() })
     const res = await fetch(`${engine.baseUrl}/health`)
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ ok: true })
   })
 
-  it('sin token o con token incorrecto → 401', async () => {
+  it('C001-1 sin token o con token incorrecto → 401', async () => {
     engine = await startTestEngine({ runner: new FakeAgentRunner() })
     const noToken = await fetch(`${engine.baseUrl}/agents`)
     expect(noToken.status).toBe(401)
@@ -47,7 +47,7 @@ describe('Control de acceso (criterios 1 y 2)', () => {
     expect(wrong.status).toBe(401)
   })
 
-  it('WebSocket sin token o con token incorrecto se cierra con 4401', async () => {
+  it('C001-1 WebSocket sin token o con token incorrecto se cierra con 4401', async () => {
     engine = await startTestEngine({ runner: new FakeAgentRunner() })
     expect(await wsCloseCode(engine.wsUrl)).toBe(WS_UNAUTHORIZED_CLOSE_CODE)
     expect(await wsCloseCode(engine.wsUrl, [`${WS_PROTOCOL_PREFIX}malo`])).toBe(
@@ -74,7 +74,7 @@ describe('Control de acceso (criterios 1 y 2)', () => {
     expect((await engine.http('GET', '/agents', undefined, { host: 'localhost' })).status).toBe(200)
   })
 
-  it('Origin ajeno → 403, también en el WebSocket; Origin de la interfaz se acepta', async () => {
+  it('C001-2 Origin ajeno → 403, también en el WebSocket; Origin de la interfaz se acepta', async () => {
     engine = await startTestEngine({ runner: new FakeAgentRunner() })
     const evil = await engine.http('GET', '/agents', undefined, { origin: 'https://evil.example' })
     expect(evil.status).toBe(403)
@@ -102,7 +102,7 @@ describe('Control de acceso (criterios 1 y 2)', () => {
 })
 
 describe('Validación de entradas (criterios 3 y 4)', () => {
-  it('crea un agente idle con el modelo por defecto de su rol', async () => {
+  it('C001-3 crea un agente idle con el modelo por defecto de su rol', async () => {
     engine = await startTestEngine({ runner: new FakeAgentRunner() })
     const { agentId } = await createProjectAndAgent(engine)
     const res = await engine.http('GET', `/agents/${agentId}`)
@@ -115,7 +115,7 @@ describe('Validación de entradas (criterios 3 y 4)', () => {
     expect(res.body.lastRun).toBeNull()
   })
 
-  it('datos inválidos → 400 VALIDATION_ERROR sin stack trace', async () => {
+  it('C001-3 datos inválidos → 400 VALIDATION_ERROR sin stack trace', async () => {
     engine = await startTestEngine({ runner: new FakeAgentRunner() })
     const res = await engine.http('POST', '/agents', { name: '', role: 'jefe' })
     expect(res.status).toBe(400)
@@ -133,7 +133,7 @@ describe('Validación de entradas (criterios 3 y 4)', () => {
     expect(text).not.toMatch(/node_modules|\.js:\d+/)
   })
 
-  it('ruta de proyecto inexistente, relativa o con ".." → 400', async () => {
+  it('C001-4 ruta de proyecto inexistente, relativa o con ".." → 400', async () => {
     engine = await startTestEngine({ runner: new FakeAgentRunner() })
     for (const p of [
       path.join(engine.dataDir, 'no-existe'),
@@ -146,7 +146,7 @@ describe('Validación de entradas (criterios 3 y 4)', () => {
     }
   })
 
-  it('projectId inexistente → 400', async () => {
+  it('C001-4 projectId inexistente → 400', async () => {
     engine = await startTestEngine({ runner: new FakeAgentRunner() })
     const res = await engine.http('POST', '/agents', {
       name: 'Ana',
@@ -166,7 +166,7 @@ describe('Validación de entradas (criterios 3 y 4)', () => {
 })
 
 describe('Ciclo de vida de una tarea', () => {
-  it('criterio 5: eventos en orden por WebSocket', async () => {
+  it('C001-5 criterio 5: eventos en orden por WebSocket', async () => {
     const runner = new FakeAgentRunner([
       { type: 'session', sessionId: 'ses-1' },
       { type: 'output', text: 'Leyendo el repo' },
@@ -222,7 +222,7 @@ describe('Ciclo de vida de una tarea', () => {
     ws.close()
   })
 
-  it('criterio 6: pausa guarda la sesión y reanudar pasa resume = sdkSessionId', async () => {
+  it('C001-6 criterio 6: pausa guarda la sesión y reanudar pasa resume = sdkSessionId', async () => {
     const runner = new FakeAgentRunner()
     runner.enqueue([
       { type: 'session', sessionId: 'ses-pausa' },
@@ -256,7 +256,7 @@ describe('Ciclo de vida de una tarea', () => {
     ws.close()
   })
 
-  it('criterio 7: stop deja stopped y no hay eventos posteriores de esa ejecución', async () => {
+  it('C001-7 criterio 7: stop deja stopped y no hay eventos posteriores de esa ejecución', async () => {
     const runner = new FakeAgentRunner([
       { type: 'output', text: 'antes' },
       { type: 'hold' },
@@ -289,7 +289,7 @@ describe('Ciclo de vida de una tarea', () => {
     ws.close()
   })
 
-  it('criterio 8: 409 si el agente ya ejecuta y 429 al exceder la concurrencia', async () => {
+  it('C001-8 criterio 8: 409 si el agente ya ejecuta y 429 al exceder la concurrencia', async () => {
     const runner = new FakeAgentRunner([{ type: 'hold' }])
     engine = await startTestEngine({ runner, config: { maxConcurrentAgents: 2 } })
     const a = await createProjectAndAgent(engine, 'A')
@@ -321,7 +321,7 @@ describe('Ciclo de vida de una tarea', () => {
     expect((await engine.http('DELETE', `/agents/${a.agentId}`)).status).toBe(409)
   })
 
-  it('criterio 9: si el runner falla → error, evento genérico y detalle solo en el log', async () => {
+  it('C001-9 criterio 9: si el runner falla → error, evento genérico y detalle solo en el log', async () => {
     const runner = new FakeAgentRunner([
       { type: 'output', text: 'empezando' },
       { type: 'fail', message: 'detalle interno del fallo' },
@@ -352,7 +352,7 @@ describe('Ciclo de vida de una tarea', () => {
 })
 
 describe('Persistencia (criterio 10)', () => {
-  it('tras reiniciar, lo que estaba en curso queda interrupted', async () => {
+  it('C001-10 tras reiniciar, lo que estaba en curso queda interrupted', async () => {
     const dataDir = tempDir()
     const runner = new FakeAgentRunner([{ type: 'hold' }])
     engine = await startTestEngine({ runner, dataDir })

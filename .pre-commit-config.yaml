@@ -1,0 +1,56 @@
+# Se corre solo en cada `git commit`. Instalar:  pip install pre-commit && pre-commit install
+# Actualizar versiones:  pre-commit autoupdate
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]      # evita subir datasets o modelos por accidente
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: no-commit-to-branch
+        args: ["--branch", "main", "--branch", "master"]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks                # contraseñas, llaves y tokens
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.0
+    hooks:
+      - id: ruff-check
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/semgrep/pre-commit
+    rev: v1.180.0
+    hooks:
+      - id: semgrep                 # código vulnerable (inyección, deserialización insegura...)
+        args: ["--config", "p/python", "--config", "p/secrets", "--error", "--skip-unknown-extensions"]
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout              # limpia outputs de notebooks
+
+  # Documentación viva: se regenera sola en cada commit. Si cambió, pre-commit
+  # se detiene para que agregues el archivo actualizado (git add) y repitas el commit.
+  - repo: local
+    hooks:
+      - id: trazabilidad
+        name: trazabilidad spec → test (docs/trazabilidad.md)
+        entry: python3 scripts/trazabilidad.py --escribir
+        language: system
+        pass_filenames: false
+        files: ^(spec/|tests?/|src/)
+      - id: openapi
+        name: contrato de la API (docs/api/openapi.json)
+        entry: bash -c '[ ! -f scripts/exportar_openapi.py ] || uv run python scripts/exportar_openapi.py'
+        language: system
+        pass_filenames: false
+        files: ^src/
