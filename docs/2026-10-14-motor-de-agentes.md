@@ -44,12 +44,30 @@
 - Re-auditoría: APROBADO CON OBSERVACIONES, sin P0/P1; dejó 7 P2 nuevos (ver tasks.md).
 - Repo publicado en https://github.com/DanielEspinosaChim/CentroDeMando
 
+### Cuarta parte (mismo día, cierre)
+
+- Correcciones de los 7 P2 de la re-auditoría:
+  - pause/stop quedan fuera del rate limit (detener siempre disponible).
+  - Rechazo de rutas UNC y de dispositivo al registrar proyectos.
+  - Revalidación del proyecto al lanzar un agente.
+  - Tope de costo al reanudar = tope − gastado en la sesión (migración 3, `runs.resumed`).
+  - Drenaje con cierre forzado a los 5 s; stop y shutdown cubren lo que drena; `idle()` con tope.
+  - Escrituras del store filtradas por `workspaceId`.
+  - ACL de la carpeta `dataDir` completa (`icacls` con `(OI)(CI)F`).
+- QA: 209 tests en verde (1 omitido: chmod POSIX en Windows).
+- Auditoría de verificación: APROBADO CON OBSERVACIONES, sin P0/P1; los 7 P2 cerrados.
+- Código publicado en https://github.com/DanielEspinosaChim/CentroDeMando (rama `main`).
+
 ## Qué quedó pendiente
 
-- Los 7 P2 de la re-auditoría (lista en tasks.md). Los más importantes: que **detener**
-  no quede bloqueado por el rate limit, y rechazar rutas UNC al registrar proyectos.
-- Revisar que el CI de GitHub Actions pase en el primer push.
+- P2 N1: el tope de costo al reanudar no cuenta ejecuciones cerradas sin `result` (costo nulo).
+- P2 N2: `restrictDataDir` reescribe la ACL de cualquier carpeta existente si `CDM_DATA_DIR`
+  apunta a una no dedicada.
+- Nota: tras `stop` sobre una ejecución que drena, el run queda en `paused` en el historial
+  (solo consistencia).
+- Revisar que el CI de GitHub Actions pase en verde.
 - Biome deja avisos de `any` en los tests.
+- Siguiente feature: 002 (bus de mensajes).
 
 ## Decisiones tomadas
 
@@ -75,3 +93,6 @@
 - Puerto por defecto `4317`; variables: `CDM_PORT`, `CDM_UI_ORIGIN`, `CDM_DATA_DIR`,
   `MAX_CONCURRENT_AGENTS`, `CDM_MAX_TURNS`.
 - `pnpm-workspace.yaml` usa `allowBuilds` (pnpm 11) para `better-sqlite3` y `esbuild`.
+- Rate limit sin dependencias (limitador propio, ventana deslizante); pause/stop sin límite
+  porque no lanzan procesos y detener debe estar siempre disponible.
+- Sin saldo al reanudar → 409 (esperar no libera saldo).
