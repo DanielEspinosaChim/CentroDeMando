@@ -64,6 +64,12 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE runs ADD COLUMN resumed INTEGER NOT NULL DEFAULT 0;
   `,
+  // 4: presupuesto (USD) concedido a cada ejecución, para descontarlo entero al reanudar
+  // si la ejecución se cerró sin reportar costo. Las filas previas quedan en NULL (el
+  // motor usa entonces el tope por tarea, que es la cota superior de lo que se concedió).
+  `
+  ALTER TABLE runs ADD COLUMN budget_usd REAL;
+  `,
 ]
 
 function migrate(sqlite: Database.Database): void {

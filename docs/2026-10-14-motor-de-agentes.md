@@ -60,14 +60,17 @@
 
 - CI de GitHub Actions en verde (windows-latest). Destapó que los runners crean archivos con entradas ACL explícitas de SYSTEM/Administradores; ahora también se quitan.
 
+### Quinta parte (mismo día, cierre definitivo)
+
+- N1 corregido: `runs.budget_usd` (migración 4); una ejecución sin costo reportado cuenta como su presupuesto completo al reanudar.
+- N2 corregido: el motor no arranca si `CDM_DATA_DIR` es la raíz, la carpeta de usuario, un ancestro o UNC; la ACL de la carpeta solo se aplica si es del motor (nueva, vacía o solo con sus archivos).
+- P1 N2-bis (encontrado por el auditor en la corrección de N2) corregido: se rechazan segmentos que terminan en `.`/espacio o con `:` (Windows los recorta: `C:\Users\u\. ` acababa cambiando permisos de la carpeta de usuario, y un proyecto `. ` lanzaba el agente en la carpeta padre). Aplica a `CDM_DATA_DIR`, proyectos y cwd.
+- `stop` sobre una ejecución pausada deja el run en `stopped`.
+- 276 tests en verde (1 omitido). Auditoría final: APROBADO, sin hallazgos.
+
 ## Qué quedó pendiente
 
-- P2 N1: el tope de costo al reanudar no cuenta ejecuciones cerradas sin `result` (costo nulo).
-- P2 N2: `restrictDataDir` reescribe la ACL de cualquier carpeta existente si `CDM_DATA_DIR`
-  apunta a una no dedicada.
-- Nota: tras `stop` sobre una ejecución que drena, el run queda en `paused` en el historial
-  (solo consistencia).
-- Biome deja avisos de `any` en los tests.
+- Avisos de Biome por `any` en tests.
 - Siguiente feature: 002 (bus de mensajes).
 
 ## Decisiones tomadas
@@ -97,3 +100,5 @@
 - Rate limit sin dependencias (limitador propio, ventana deslizante); pause/stop sin límite
   porque no lanzan procesos y detener debe estar siempre disponible.
 - Sin saldo al reanudar → 409 (esperar no libera saldo).
+- Ante la duda, el tope de costo sobrestima (cuenta el presupuesto completo si no hay costo reportado).
+- Si `CDM_DATA_DIR` ya existe con archivos ajenos, el motor no toca su ACL (solo avisa); el token se protege igual.

@@ -11,8 +11,10 @@ async function main(): Promise<void> {
   // El logger aún no existe: se acumulan los avisos y se registran tras crear la app.
   const aclWarnings: string[] = []
   const onWarning = (message: string) => aclWarnings.push(message)
-  // Primero la carpeta: data.db (y sus -wal/-shm) y el token nacen ya con la ACL privada
-  // heredada, aunque CDM_DATA_DIR apunte a una carpeta compartida.
+  // `loadConfig` ya rechazó una carpeta de datos peligrosa (raíz, carpeta de usuario o
+  // ancestro, UNC). Primero la carpeta: si es del motor, data.db (y sus -wal/-shm) y el
+  // token nacen ya con la ACL privada heredada; si tiene archivos ajenos no se toca su
+  // ACL y se avisa (el token se protege igual).
   restrictDataDir(config.dataDir, { onWarning })
   const handle = openDb(path.join(config.dataDir, 'data.db'))
   const store = createStore(handle.db)

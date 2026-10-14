@@ -3,6 +3,7 @@ import type { EngineEvent } from '@cdm/shared'
 import { afterEach, describe, expect, it } from 'vitest'
 import { FakeAgentRunner } from '../src/agents/fake-runner.ts'
 import { GENERIC_RUN_ERROR } from '../src/agents/manager.ts'
+import { DEFAULT_MAX_COST_USD_PER_TASK } from '../src/config.ts'
 import { openDb } from '../src/db/client.ts'
 import { createStore } from '../src/db/store.ts'
 import { WS_PROTOCOL_PREFIX, WS_UNAUTHORIZED_CLOSE_CODE } from '../src/security/guards.ts'
@@ -226,6 +227,8 @@ describe('Ciclo de vida de una tarea', () => {
     runner.enqueue([
       { type: 'session', sessionId: 'ses-pausa' },
       { type: 'output', text: 'a' },
+      // El SDK real reporta costo en cada turno: sin él no hay presupuesto que descontar.
+      { type: 'usage', inputTokens: 10, outputTokens: 5, costUsd: 0.01, contextUsedPct: 1 },
       { type: 'hold' },
     ])
     runner.enqueue([{ type: 'output', text: 'continuando' }])
@@ -234,7 +237,7 @@ describe('Ciclo de vida de una tarea', () => {
     const ws = await connectWs(engine.wsUrl, [`${WS_PROTOCOL_PREFIX}${engine.token}`])
 
     await engine.http('POST', `/agents/${agentId}/tasks`, { prompt: 'Tarea larga', model: 'opus' })
-    await ws.waitFor((e) => e.type === 'agent.output')
+    await ws.waitFor((e) => e.type === 'agent.usage')
     const paused = await engine.http('POST', `/agents/${agentId}/pause`)
     expect(paused.status).toBe(200)
     expect(paused.body.agent).toMatchObject({ status: 'paused', sdkSessionId: 'ses-pausa' })
@@ -246,6 +249,7 @@ describe('Ciclo de vida de una tarea', () => {
       (e) => e.runId === resumed.body.runId && e.type === 'agent.status' && e.status === 'done',
     )
     expect(runner.calls[1]).toMatchObject({ resume: 'ses-pausa', model: 'opus' })
+    expect(runner.calls[1]?.maxBudgetUsd).toBeCloseTo(DEFAULT_MAX_COST_USD_PER_TASK - 0.01)
 
     // Reanudar algo que no está en pausa → 409.
     expect((await engine.http('POST', `/agents/${agentId}/resume`, {})).status).toBe(409)

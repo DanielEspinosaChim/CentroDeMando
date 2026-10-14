@@ -488,3 +488,172 @@ describe('restrictDataDir (ACL real en Windows)', () => {
     expect(fs.readFileSync(path.join(data, 'f.txt'), 'utf8')).toBe('ok')
   })
 })
+
+describe('restrictDataDir (solo toca carpetas dedicadas al motor)', () => {
+  const FOREIGN = 'secreto-ajeno-del-usuario.docx'
+
+  function icaclsCalls(calls: Call[]): Call[] {
+    return calls.filter((c) => path.win32.basename(c.file).toLowerCase() === 'icacls.exe')
+  }
+
+  it('carpeta nueva: aplica la ACL', () => {
+    const { exec, calls } = fakeExec()
+    restrictDataDir(path.join(dir, 'nueva'), { platform: 'win32', exec })
+    expect(icaclsCalls(calls)).toHaveLength(1)
+  })
+
+  it('carpeta existente vacía: aplica la ACL', () => {
+    const { exec, calls } = fakeExec()
+    const warnings: string[] = []
+    restrictDataDir(dir, { platform: 'win32', exec, onWarning: (m) => warnings.push(m) })
+    expect(icaclsCalls(calls)).toHaveLength(1)
+    expect(warnings).toEqual([])
+  })
+
+  it('solo archivos del motor: aplica la ACL', () => {
+    for (const f of ['data.db', 'data.db-wal', 'data.db-shm', TOKEN_FILE_NAME]) {
+      fs.writeFileSync(path.join(dir, f), 'x')
+    }
+    const { exec, calls } = fakeExec()
+    restrictDataDir(dir, { platform: 'win32', exec })
+    expect(icaclsCalls(calls)).toHaveLength(1)
+  })
+
+  it('solo archivos del motor con otras mayúsculas (Windows): aplica la ACL', () => {
+    for (const f of ['DATA.DB', 'Data.Db-Wal', 'DATA.db-SHM', 'Local-Token']) {
+      fs.writeFileSync(path.join(dir, f), 'x')
+    }
+    const { exec, calls } = fakeExec()
+    restrictDataDir(dir, { platform: 'win32', exec })
+    expect(icaclsCalls(calls)).toHaveLength(1)
+  })
+
+  it('con un archivo ajeno: no llama a icacls y avisa una vez sin nombrarlo', () => {
+    fs.writeFileSync(path.join(dir, 'data.db'), 'x')
+    fs.writeFileSync(path.join(dir, FOREIGN), 'x')
+    const { exec, calls } = fakeExec()
+    const warnings: string[] = []
+    restrictDataDir(dir, { platform: 'win32', exec, onWarning: (m) => warnings.push(m) })
+    expect(calls).toHaveLength(0)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).not.toContain(FOREIGN)
+    expect(warnings[0]).not.toContain('docx')
+  })
+
+  it('con una subcarpeta ajena tampoco aplica la ACL', () => {
+    fs.mkdirSync(path.join(dir, 'Documentos'))
+    const { exec, calls } = fakeExec()
+    const warnings: string[] = []
+    restrictDataDir(dir, { platform: 'win32', exec, onWarning: (m) => warnings.push(m) })
+    expect(calls).toHaveLength(0)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).not.toContain('Documentos')
+  })
+
+  it('el token de una carpeta ajena sigue protegiéndose por su cuenta', () => {
+    fs.writeFileSync(path.join(dir, FOREIGN), 'x')
+    const { exec, calls } = fakeExec()
+    restrictDataDir(dir, { platform: 'win32', exec })
+    getOrCreateLocalToken(dir, { platform: 'win32', exec })
+    const grants = calls.filter((c) => c.args.includes('/grant:r')).map((c) => c.args[3])
+    expect(grants).toEqual([`*${FAKE_SID}:F`])
+  })
+})
+
+describe('rutas ambiguas para Windows (no se llama a icacls)', () => {
+  const winOnly = it.runIf(IS_WIN)
+  const literal = (p: string) => ['', '', '?', p].join(String.fromCharCode(92))
+  const names = (calls: Call[]) => calls.map((c) => path.win32.basename(c.file).toLowerCase())
+
+  /** Crea una carpeta literal (Node usa el prefijo de dispositivo para crearla tal cual). */
+  function ambiguousDir(name: string): string {
+    fs.mkdirSync(literal(path.join(dir, name)))
+    return path.join(dir, name)
+  }
+
+  afterEach(() => {
+    if (!IS_WIN) return
+    for (const n of ['amb.', 'amb ']) {
+      try {
+        fs.rmdirSync(literal(path.join(dir, n)))
+      } catch {}
+    }
+  })
+
+  it('restrictDataDir con ruta ambigua: no llama a exec, no crea la carpeta y avisa una vez', () => {
+    const target = path.join(dir, 'nueva.')
+    const { exec, calls } = fakeExec()
+    const warnings: string[] = []
+    restrictDataDir(target, { platform: 'win32', exec, onWarning: (m) => warnings.push(m) })
+    expect(calls).toHaveLength(0)
+    expect(fs.existsSync(IS_WIN ? literal(target) : target)).toBe(false)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).not.toContain(FAKE_SID)
+    expect(warnings[0]).toMatch(/ambigua/)
+  })
+
+  it('restrictDataDir con ":" de flujo alternativo: no llama a exec y avisa', () => {
+    const { exec, calls } = fakeExec()
+    const warnings: string[] = []
+    restrictDataDir(path.join(dir, 'x:ads'), {
+      platform: 'win32',
+      exec,
+      onWarning: (m) => warnings.push(m),
+    })
+    expect(calls).toHaveLength(0)
+    expect(warnings).toHaveLength(1)
+  })
+
+  it('restrictDataDir sin onWarning con ruta ambigua tampoco lanza', () => {
+    const { exec, calls } = fakeExec()
+    expect(() => restrictDataDir(path.join(dir, 'z '), { platform: 'win32', exec })).not.toThrow()
+    expect(calls).toHaveLength(0)
+  })
+
+  winOnly('junction a una carpeta vacía: no llama a exec y avisa', () => {
+    const real = path.join(dir, 'real-vacia')
+    fs.mkdirSync(real)
+    const link = path.join(dir, 'enlace')
+    fs.symlinkSync(real, link, 'junction')
+    const { exec, calls } = fakeExec()
+    const warnings: string[] = []
+    restrictDataDir(link, { platform: 'win32', exec, onWarning: (m) => warnings.push(m) })
+    expect(calls).toHaveLength(0)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/ambigua/)
+    fs.rmdirSync(link)
+  })
+
+  it('regresión: ruta normal sí llama a whoami e icacls', () => {
+    const { exec, calls } = fakeExec()
+    const warnings: string[] = []
+    restrictDataDir(path.join(dir, 'normal'), {
+      platform: 'win32',
+      exec,
+      onWarning: (m) => warnings.push(m),
+    })
+    expect(names(calls)).toEqual(['whoami.exe', 'icacls.exe'])
+    expect(warnings).toEqual([])
+  })
+
+  winOnly('getOrCreateLocalToken sobre dataDir ambiguo: devuelve token y no llama a icacls', () => {
+    const target = ambiguousDir('amb ')
+    const { exec, calls } = fakeExec()
+    const warnings: string[] = []
+    const token = getOrCreateLocalToken(target, {
+      platform: 'win32',
+      exec,
+      onWarning: (m) => warnings.push(m),
+    })
+    expect(token).toMatch(BASE64URL_43)
+    expect(names(calls)).not.toContain('icacls.exe')
+    expect(warnings.length).toBeGreaterThanOrEqual(1)
+    for (const w of warnings) expect(w).not.toContain(token)
+  })
+
+  it('getOrCreateLocalToken con ruta normal sigue llamando a icacls (regresión)', () => {
+    const { exec, calls } = fakeExec()
+    getOrCreateLocalToken(dir, { platform: 'win32', exec })
+    expect(names(calls)).toEqual(['whoami.exe', 'icacls.exe'])
+  })
+})

@@ -67,6 +67,47 @@ describe('migraciones', () => {
     h.close()
   })
 
+  it('una base en la versión 3 sube a la última y añade runs.budget_usd (NULL en filas previas)', () => {
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(4)
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cdm-mig-')), 'data.db')
+    const v3 = new Database(file)
+    for (const m of MIGRATIONS.slice(0, 3)) v3.exec(m)
+    v3.pragma('user_version = 3')
+    v3.exec(`
+      INSERT INTO projects VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ0', 'local', 'P', 'C:/p', 1);
+      INSERT INTO agents VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ1', 'local', '01JABCDEFGHJKMNPQRSTVWXYZ0',
+        'A', 'qa', 'sonnet', 'paused', 'ses', 1, 1);
+      INSERT INTO runs (id, agent_id, prompt, model, status, cost_usd, started_at, workspace_id, resumed)
+        VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ2', '01JABCDEFGHJKMNPQRSTVWXYZ1', 'x', 'sonnet', 'paused',
+        NULL, 1, 'local', 0);
+    `)
+    const before = v3.prepare('PRAGMA table_info(runs)').all() as Array<{ name: string }>
+    expect(before.map((c) => c.name)).not.toContain('budget_usd')
+    v3.close()
+
+    const h = openDb(file)
+    expect(h.sqlite.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length)
+    const columns = h.sqlite.prepare('PRAGMA table_info(runs)').all() as Array<{ name: string }>
+    expect(columns.map((c) => c.name)).toContain('budget_usd')
+    const row = h.sqlite.prepare('SELECT budget_usd FROM runs').get() as {
+      budget_usd: number | null
+    }
+    expect(row.budget_usd).toBeNull()
+
+    const store = createStore(h.db)
+    const agentId = '01JABCDEFGHJKMNPQRSTVWXYZ1'
+    expect(store.sessionRunSpend('local', agentId)).toEqual([{ costUsd: null, budgetUsd: null }])
+    store.createRun('local', agentId, 'y', 'sonnet', true, 0.75)
+    expect(store.sessionRunSpend('local', agentId)).toEqual([
+      { costUsd: null, budgetUsd: null },
+      { costUsd: null, budgetUsd: 0.75 },
+    ])
+    // Sin presupuesto explícito se guarda NULL.
+    store.createRun('local', agentId, 'z', 'sonnet')
+    expect(store.lastRun('local', agentId)).not.toHaveProperty('budgetUsd')
+    h.close()
+  })
+
   it('abrir dos veces no vuelve a aplicar migraciones', () => {
     const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cdm-mig-')), 'data.db')
     openDb(file).close()

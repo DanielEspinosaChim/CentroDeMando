@@ -190,7 +190,148 @@ describe('sessionSpentUsd', () => {
   })
 })
 
+describe('sessionSpentUsd con presupuesto concedido', () => {
+  it('un costo nulo cuenta el presupuesto concedido', () => {
+    expect(sessionSpentUsd([{ costUsd: null, budgetUsd: 0.4 }])).toBeCloseTo(0.4)
+  })
+  it('un costo nulo sin presupuesto conocido no aporta', () => {
+    expect(sessionSpentUsd([{ costUsd: null, budgetUsd: null }])).toBe(0)
+    expect(sessionSpentUsd([{ costUsd: null, budgetUsd: 0 }])).toBe(0)
+  })
+  it('con costo reportado el presupuesto es irrelevante y los acumulados no se cuentan doble', () => {
+    expect(
+      sessionSpentUsd([
+        { costUsd: 0.5, budgetUsd: 1.5 },
+        { costUsd: 0.8, budgetUsd: 1.0 },
+        { costUsd: 1.3, budgetUsd: 0.7 },
+      ]),
+    ).toBeCloseTo(1.3)
+  })
+  it('un nulo en medio suma su presupuesto y no altera el último acumulado', () => {
+    expect(
+      sessionSpentUsd([
+        { costUsd: 0.5, budgetUsd: 1.5 },
+        { costUsd: null, budgetUsd: 0.2 },
+        { costUsd: 0.8, budgetUsd: 1.0 },
+      ]),
+    ).toBeCloseTo(0.5 + 0.2 + 0.3)
+  })
+})
+
 describe('Tope de costo al reanudar', () => {
+  /** Deja un agente pausado con una sola ejecución guardada a mano (sin pasar por el runner). */
+  function pausedWithRun(rig: Rig, budgetUsd: number | null, costUsd: number | null): void {
+    const run = rig.store.createRun('local', rig.agentId, 'x', 'sonnet', false, budgetUsd)
+    if (costUsd !== null) {
+      rig.store.setRunTotals('local', run.id, {
+        inputTokens: 1,
+        outputTokens: 1,
+        costUsd,
+        contextUsedPct: 1,
+      })
+    }
+    rig.store.setAgentSession('local', rig.agentId, 's1')
+    rig.store.setAgentStatus('local', rig.agentId, 'paused')
+  }
+
+  it('costo nulo con el presupuesto completo → 409 y el runner no se llama', async () => {
+    const rig = makeRig({ maxCost: 1.5 })
+    // Pausa real sin ningún usage: el costo queda nulo y se concedió el tope completo.
+    rig.runner.enqueue([{ type: 'session', sessionId: 's1' }, { type: 'hold' }])
+    rig.manager.startTask('local', rig.agentId, { prompt: 'x' })
+    await settle()
+    await rig.manager.pause('local', rig.agentId)
+    expect(rig.store.sessionRunSpend('local', rig.agentId)).toEqual([
+      { costUsd: null, budgetUsd: 1.5 },
+    ])
+
+    let error: unknown
+    try {
+      rig.manager.resume('local', rig.agentId, {})
+    } catch (err) {
+      error = err
+    }
+    expect(error).toBeInstanceOf(ConflictError)
+    expect((error as ConflictError).message).toBe(BUDGET_EXHAUSTED_MESSAGE)
+    expect(rig.runner.calls).toHaveLength(1)
+    expect(rig.store.getAgent('local', rig.agentId)?.status).toBe('paused')
+  })
+
+  it('costo nulo con presupuesto parcial → el siguiente resume recibe un maxBudgetUsd menor', () => {
+    const rig = makeRig({ maxCost: 1.5 })
+    pausedWithRun(rig, 0.4, null)
+    rig.runner.enqueue([])
+    rig.manager.resume('local', rig.agentId, {})
+    expect(rig.runner.calls[0]?.maxBudgetUsd).toBeCloseTo(1.1)
+  })
+
+  it('encadena: reanudación con presupuesto parcial que también queda sin costo', async () => {
+    const rig = makeRig({ maxCost: 1.5 })
+    await startAndPause(rig, 0.5) // concede 1.5, gasta 0.5
+    rig.runner.enqueue([{ type: 'hold' }]) // la reanudación (presupuesto 1.0) no reporta costo
+    rig.manager.resume('local', rig.agentId, {})
+    await settle()
+    await rig.manager.pause('local', rig.agentId)
+    // 0.5 reportado + 1.0 concedido a la ejecución sin costo = 1.5 → sin saldo.
+    expect(() => rig.manager.resume('local', rig.agentId, {})).toThrow(ConflictError)
+    expect(rig.runner.calls).toHaveLength(2)
+  })
+
+  it('filas sin presupuesto (previas a la migración) con costo nulo cuentan el tope por tarea', () => {
+    const rig = makeRig({ maxCost: 1.5 })
+    pausedWithRun(rig, null, null)
+    expect(() => rig.manager.resume('local', rig.agentId, {})).toThrow(ConflictError)
+    expect(rig.runner.calls).toHaveLength(0)
+  })
+
+  it('filas sin presupuesto pero con costo reportado cuentan solo el costo', () => {
+    const rig = makeRig({ maxCost: 1.5 })
+    pausedWithRun(rig, null, 0.5)
+    rig.runner.enqueue([])
+    rig.manager.resume('local', rig.agentId, {})
+    expect(rig.runner.calls[0]?.maxBudgetUsd).toBeCloseTo(1.0)
+  })
+
+  it('un usage que llega DESPUÉS de la pausa también se guarda y cuenta', async () => {
+    // Runner a mano: interrupt() no corta la iteración; el costo llega tras pausar.
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const calls: RunOptions[] = []
+    const late: AgentRunner = {
+      run: (options) => {
+        calls.push(options)
+        async function* events(): AsyncGenerator<RunnerEvent> {
+          yield { type: 'session', sessionId: 's1' }
+          await gate
+          yield usage(0.9)
+        }
+        return { events: events(), interrupt: async () => {}, close: () => release() }
+      },
+    }
+    const rig = makeRig({ maxCost: 1.5, runner: late })
+    rig.manager.startTask('local', rig.agentId, { prompt: 'x' })
+    await settle()
+    const pausing = rig.manager.pause('local', rig.agentId)
+    await settle()
+    expect(rig.store.getAgent('local', rig.agentId)?.status).toBe('paused')
+    // Aún sin costo: el usage llega ahora, con el agente ya en pausa.
+    expect(rig.store.sessionRunSpend('local', rig.agentId)[0]?.costUsd).toBeNull()
+    release()
+    await pausing
+    await rig.manager.idle()
+
+    expect(rig.store.lastRun('local', rig.agentId)).toMatchObject({
+      status: 'paused',
+      costUsd: 0.9,
+    })
+    rig.manager.resume('local', rig.agentId, {})
+    expect(calls[1]?.maxBudgetUsd).toBeCloseTo(0.6)
+    release()
+    await rig.manager.idle()
+  })
+
   it('reanuda con maxBudgetUsd = tope − gastado', async () => {
     const rig = makeRig({ maxCost: 1.5 })
     await startAndPause(rig, 0.5)
@@ -298,6 +439,24 @@ class StuckRunner implements AgentRunner {
   }
 }
 
+describe('stop sobre un agente pausado ya drenado', () => {
+  it('deja el último run en stopped con endedAt y el agente en stopped', async () => {
+    const rig = makeRig()
+    await startAndPause(rig, 0.1)
+    await rig.manager.idle()
+    expect(rig.manager.activeCount()).toBe(0)
+    const pausedAt = rig.store.lastRun('local', rig.agentId)?.endedAt
+    expect(pausedAt).toEqual(expect.any(Number))
+
+    const agent = await rig.manager.stop('local', rig.agentId)
+    expect(agent.status).toBe('stopped')
+    const run = rig.store.lastRun('local', rig.agentId)
+    expect(run?.status).toBe('stopped')
+    // Ya había drenado: conserva el endedAt de la pausa.
+    expect(run?.endedAt).toBe(pausedAt)
+  })
+})
+
 describe('Drenaje de ejecuciones que no terminan', () => {
   // NOTA: DRAIN_TIMEOUT_MS (5 s) no es inyectable; se usan timers falsos y se avanza 5000 ms,
   // así que estos tests no tardan tiempo real.
@@ -367,6 +526,26 @@ describe('Drenaje de ejecuciones que no terminan', () => {
     expect(stuck.runs[0]?.closeCalls).toBeGreaterThanOrEqual(1)
     expect(stuck.runs[0]?.options.signal.aborted).toBe(true)
     expect(rig.manager.activeCount()).toBe(0)
+    await pausing
+  })
+
+  it('stop sobre una pausa que sigue drenando deja el run en stopped con endedAt', async () => {
+    const stuck = new StuckRunner()
+    const rig = makeRig({ runner: stuck })
+    rig.manager.startTask('local', rig.agentId, { prompt: 'x' })
+    await vi.advanceTimersByTimeAsync(1)
+    const pausing = rig.manager.pause('local', rig.agentId)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(rig.manager.activeCount()).toBe(1)
+    const pausedAt = rig.store.lastRun('local', rig.agentId)?.endedAt
+    expect(pausedAt).toEqual(expect.any(Number))
+
+    await vi.advanceTimersByTimeAsync(50)
+    await rig.manager.stop('local', rig.agentId)
+    const run = rig.store.lastRun('local', rig.agentId)
+    expect(run?.status).toBe('stopped')
+    expect(run?.endedAt).toEqual(expect.any(Number))
+    expect(run?.endedAt).toBeGreaterThanOrEqual(pausedAt as number)
     await pausing
   })
 

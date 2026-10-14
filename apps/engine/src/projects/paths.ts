@@ -29,6 +29,25 @@ export function isUncPath(p: string): boolean {
   return /^[\\/]{2}/.test(p)
 }
 
+/**
+ * `true` si Windows interpretaría la ruta distinto que Node. Node abre las rutas con el
+ * prefijo `\\?\` (literal), pero la API Win32 sin prefijo (icacls, el `cwd` de un proceso
+ * hijo) recorta los puntos y espacios finales de cada segmento: `C:\Users\u\. ` es para
+ * Node una carpeta literal dentro del perfil y para Windows el propio perfil, y
+ * `...\Documents.` acaba en `Documents`. Un `:` fuera del prefijo de unidad (`C:`) nombra
+ * un flujo alternativo (ADS). Se rechaza cualquier segmento que termine en `.` o espacio,
+ * salvo `.` y `..` puros: `path.resolve` los colapsa igual que Windows y además siempre
+ * se comprueba también la ruta resuelta. Se aplica en todas las plataformas por sencillez:
+ * en POSIX solo impide nombres poco habituales.
+ */
+export function hasAmbiguousWin32Segment(p: string): boolean {
+  const rest = p.replace(/^[A-Za-z]:/, '')
+  if (rest.includes(':')) return true
+  return rest
+    .split(/[\\/]+/)
+    .some((segment) => segment !== '.' && segment !== '..' && /[. ]$/.test(segment))
+}
+
 function realOrSelf(p: string): string {
   try {
     return fs.realpathSync.native(p)
@@ -44,6 +63,10 @@ export interface ProjectPathOptions {
 
 const UNC_PATH_MESSAGE = 'path: no se admiten rutas de red (UNC) ni de dispositivo'
 const UNC_CWD_MESSAGE = 'cwd: no se admiten rutas de red (UNC) ni de dispositivo'
+const AMBIGUOUS_SEGMENT_RULE =
+  'ningún segmento puede terminar en "." o en espacio ni contener ":" fuera de la unidad (Windows los recorta y la ruta acabaría en otra carpeta)'
+const AMBIGUOUS_PATH_MESSAGE = `path: ${AMBIGUOUS_SEGMENT_RULE}`
+const AMBIGUOUS_CWD_MESSAGE = `cwd: ${AMBIGUOUS_SEGMENT_RULE}`
 
 /**
  * Normaliza la ruta de un proyecto nuevo: absoluta, local (no UNC), sin `..`, existente,
@@ -55,6 +78,7 @@ export function resolveProjectPath(raw: string, opts: ProjectPathOptions = {}): 
   if (isUncPath(raw)) throw new ValidationError(UNC_PATH_MESSAGE)
   if (!path.isAbsolute(raw)) throw new ValidationError('path: debe ser una ruta absoluta')
   if (hasDotDotSegment(raw)) throw new ValidationError('path: no puede contener ".."')
+  if (hasAmbiguousWin32Segment(raw)) throw new ValidationError(AMBIGUOUS_PATH_MESSAGE)
   let real: string
   try {
     real = fs.realpathSync.native(path.normalize(raw))
@@ -63,6 +87,8 @@ export function resolveProjectPath(raw: string, opts: ProjectPathOptions = {}): 
   }
   // Un enlace local podría apuntar a un recurso de red: se revisa también la ruta real.
   if (isUncPath(real)) throw new ValidationError(UNC_PATH_MESSAGE)
+  // También la real: un enlace puede apuntar a una carpeta literal `x.` o `. `.
+  if (hasAmbiguousWin32Segment(real)) throw new ValidationError(AMBIGUOUS_PATH_MESSAGE)
   if (!fs.statSync(real).isDirectory()) throw new ValidationError('path: debe ser una carpeta')
   if (path.parse(real).root === real || path.dirname(real) === real) {
     throw new ValidationError('path: no puede ser la raíz de una unidad')
@@ -109,6 +135,11 @@ export function revalidateProjectPath(storedPath: string, opts: ProjectPathOptio
 export function assertCwdInProject(projectPath: string, cwd: string = projectPath): string {
   if (isUncPath(projectPath) || isUncPath(cwd)) throw new ValidationError(UNC_CWD_MESSAGE)
   if (hasDotDotSegment(cwd)) throw new ValidationError('cwd: no puede contener ".."')
+  // El agente se lanza con este cwd por la API Win32, que recortaría `x.` a `x` o `. ` a
+  // la carpeta padre: el proceso acabaría fuera de la carpeta comprobada aquí.
+  if (hasAmbiguousWin32Segment(projectPath) || hasAmbiguousWin32Segment(cwd)) {
+    throw new ValidationError(AMBIGUOUS_CWD_MESSAGE)
+  }
   let realProject: string
   let realCwd: string
   try {
@@ -118,6 +149,9 @@ export function assertCwdInProject(projectPath: string, cwd: string = projectPat
     throw new ValidationError('cwd: la ruta del proyecto ya no existe')
   }
   if (isUncPath(realProject) || isUncPath(realCwd)) throw new ValidationError(UNC_CWD_MESSAGE)
+  if (hasAmbiguousWin32Segment(realProject) || hasAmbiguousWin32Segment(realCwd)) {
+    throw new ValidationError(AMBIGUOUS_CWD_MESSAGE)
+  }
   if (!isInside(realProject, realCwd)) {
     throw new ValidationError('cwd: fuera del proyecto registrado')
   }

@@ -11,7 +11,7 @@ import {
 } from '@cdm/shared'
 import type { FastifyBaseLogger } from 'fastify'
 import type { EngineConfig } from '../config.ts'
-import type { RunTotals, Store } from '../db/store.ts'
+import type { RunSpend, RunTotals, Store } from '../db/store.ts'
 import { ConflictError, LimitError, NotFoundError, ValidationError } from '../errors/index.ts'
 import type { EventHub } from '../events/hub.ts'
 import { assertCwdInProject, revalidateProjectPath } from '../projects/paths.ts'
@@ -60,8 +60,9 @@ const SHUTDOWN_IDLE_TIMEOUT_MS = 3000
 const MIN_RESUME_BUDGET_USD = 0.01
 
 /**
- * Gasto real (USD) de una sesión a partir del `costUsd` reportado por cada ejecución
- * (orden cronológico, desde el último inicio no reanudado).
+ * Gasto (USD) de una sesión a partir de cada ejecución (orden cronológico, desde el
+ * último inicio no reanudado). Cada entrada es el `costUsd` reportado (número o `null`)
+ * o un `RunSpend` con el costo y el presupuesto concedido a esa ejecución.
  *
  * Decisión (ver `sdk.d.ts`, `total_cost_usd` y `maxBudgetUsd`): el SDK documenta que una
  * sesión reanudada "continúa desde el total que guardó su transcript, cuando lo tiene",
@@ -70,14 +71,27 @@ const MIN_RESUME_BUDGET_USD = 0.01
  * costos tal cual contaría doble. Por eso cada costo se trata como acumulado de la
  * sesión: se suma solo lo que crece respecto al último reportado. Si un costo baja
  * (el transcript no tenía total y el contador empezó de cero), esa ejecución se suma
- * entera. Las ejecuciones sin costo (`null`, cerradas antes de su `result`) no aportan:
- * su gasto no es medible desde aquí.
+ * entera.
+ *
+ * Ejecuciones sin costo (`null`: cerradas antes de su `result`, p. ej. porque venció la
+ * espera de drenado y se forzó el cierre): su gasto no es medible, así que se cuenta el
+ * presupuesto completo que se les concedió (dirección segura: el SDK no las dejó gastar
+ * más). No se toca `lastReported`: si el costo acumulado de la siguiente ejecución ya
+ * incluye ese gasto, el incremento se cuenta además del presupuesto, lo que sobrestima
+ * (nunca subestima) lo gastado. Un `null` sin presupuesto conocido (número suelto o fila
+ * previa a la migración 4 sin que el llamador lo rellene) no aporta.
  */
-export function sessionSpentUsd(costs: ReadonlyArray<number | null>): number {
+export function sessionSpentUsd(runs: ReadonlyArray<number | null | RunSpend>): number {
   let spent = 0
   let lastReported = 0
-  for (const cost of costs) {
-    if (cost === null || !Number.isFinite(cost) || cost < 0) continue
+  for (const entry of runs) {
+    const cost = typeof entry === 'object' && entry !== null ? entry.costUsd : entry
+    if (cost === null) {
+      const budget = typeof entry === 'object' && entry !== null ? entry.budgetUsd : null
+      if (budget !== null && Number.isFinite(budget) && budget > 0) spent += budget
+      continue
+    }
+    if (!Number.isFinite(cost) || cost < 0) continue
     spent += cost >= lastReported ? cost - lastReported : cost
     lastReported = cost
   }
@@ -189,7 +203,12 @@ export class AgentManager {
     // N veces no puede dar N topes. Sin saldo se responde 409 (ConflictError) y no 429
     // (LimitError): no es un límite temporal que se libere esperando, sino el estado de
     // esta sesión; reintentar no sirve y la salida es iniciar una tarea nueva.
-    const spent = sessionSpentUsd(this.deps.store.sessionRunCosts(workspaceId, agent.id))
+    // Una ejecución sin presupuesto guardado (fila previa a la migración 4) se acota con el
+    // tope por tarea: nunca se le concedió más que eso.
+    const runs = this.deps.store
+      .sessionRunSpend(workspaceId, agent.id)
+      .map((r) => ({ ...r, budgetUsd: r.budgetUsd ?? this.deps.config.maxCostUsdPerTask }))
+    const spent = sessionSpentUsd(runs)
     const remaining = this.deps.config.maxCostUsdPerTask - spent
     if (remaining < MIN_RESUME_BUDGET_USD) throw new ConflictError(BUDGET_EXHAUSTED_MESSAGE)
     const model = this.deps.store.lastRun(workspaceId, agent.id)?.model ?? agent.defaultModel
@@ -223,10 +242,17 @@ export class AgentManager {
       const draining = this.draining.get(agent.id)
       if (draining) {
         draining.ended = 'stopped'
+        draining.status = 'stopped'
         this.forceClose(draining)
       }
       this.deps.store.setAgentStatus(workspaceId, agent.id, 'stopped')
       const lastRun = this.deps.store.lastRun(workspaceId, agent.id)
+      // La ejecución pausada pasa a `stopped` igual que el agente (filtrando por workspace).
+      // Si aún drenaba, termina ahora (nuevo `endedAt`); si ya había drenado, conserva el
+      // `endedAt` de la pausa.
+      if (lastRun?.status === 'paused') {
+        this.deps.store.setRunStatus(workspaceId, lastRun.id, 'stopped', Boolean(draining))
+      }
       if (lastRun) this.emit(workspaceId, statusEvent(agent.id, lastRun.id, 'stopped'))
       if (draining) await this.waitDrained(draining)
     } else {
@@ -314,7 +340,16 @@ export class AgentManager {
     const projectPath = revalidateProjectPath(project.path, { dataDir: this.deps.config.dataDir })
     const cwd = assertCwdInProject(projectPath)
 
-    const run = this.deps.store.createRun(workspaceId, agent.id, prompt, model, Boolean(resume))
+    // Se guarda el presupuesto concedido: si la ejecución termina sin `result` (costo nulo),
+    // al reanudar se descuenta entero (ver `sessionSpentUsd`).
+    const run = this.deps.store.createRun(
+      workspaceId,
+      agent.id,
+      prompt,
+      model,
+      Boolean(resume),
+      maxBudgetUsd,
+    )
     if (!resume) this.deps.store.setAgentSession(workspaceId, agent.id, null)
     this.deps.store.setAgentStatus(workspaceId, agent.id, 'thinking')
 

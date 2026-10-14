@@ -54,6 +54,8 @@ export const runs = sqliteTable(
     endedAt: integer('ended_at'),
     /** Interno (no sale en la API): la ejecución reanudó la sesión de la anterior. */
     resumed: integer('resumed', { mode: 'boolean' }).notNull().default(false),
+    /** Interno (no sale en la API): `maxBudgetUsd` concedido a la ejecución; NULL en filas previas. */
+    budgetUsd: real('budget_usd'),
   },
   (t) => [index('runs_agent_idx').on(t.agentId), index('runs_workspace_idx').on(t.workspaceId)],
 )

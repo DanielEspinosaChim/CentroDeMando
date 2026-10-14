@@ -1,10 +1,11 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { ValidationError } from '../errors/index.ts'
 import {
   assertCwdInProject,
+  hasAmbiguousWin32Segment,
   isInside,
   isUncPath,
   resolveProjectPath,
@@ -154,5 +155,98 @@ describe('revalidateProjectPath', () => {
 
   it('rechaza una carpeta que ya no existe', () => {
     expect(() => revalidateProjectPath(path.join(root, 'no-existe'))).toThrow(ValidationError)
+  })
+})
+
+describe('hasAmbiguousWin32Segment', () => {
+  it.each([
+    'C:\\a\\b.',
+    'C:\\a\\b ',
+    'C:\\a\\. ',
+    'C:\\a\\.. ',
+    'C:\\a\\...',
+    'C:\\a\\b:ads',
+    'C:\\ ',
+  ])('true para %j', (p) => expect(hasAmbiguousWin32Segment(p)).toBe(true))
+
+  it.each(['C:\\a\\b', 'C:\\a\\.\\b', 'C:\\a\\x\\..\\b', 'C:\\a\\b.txt', 'C:\\a\\.git'])(
+    'false para %j',
+    (p) => expect(hasAmbiguousWin32Segment(p)).toBe(false),
+  )
+})
+
+const IS_WIN = process.platform === 'win32'
+
+describe('segmentos ambiguos de Windows (carpetas literales con prefijo de dispositivo)', () => {
+  let base = ''
+  let lit = ''
+  let docsDot = ''
+  let dotSpace = ''
+  let normal = ''
+  let linkToDotSpace = ''
+
+  beforeAll(() => {
+    if (!IS_WIN) return
+    base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cdm-amb-')))
+    lit = `\\\\?\\${base}`
+    docsDot = path.join(base, 'Docs.')
+    dotSpace = path.join(base, '. ')
+    normal = path.join(base, 'Docs')
+    linkToDotSpace = path.join(base, 'enlace-punto-espacio')
+    fs.mkdirSync(`${lit}\\Docs.`)
+    fs.mkdirSync(`${lit}\\. `)
+    fs.mkdirSync(normal)
+    fs.symlinkSync(`${lit}\\. `, linkToDotSpace, 'junction')
+  })
+
+  afterAll(() => {
+    if (!IS_WIN || !base) return
+    // Las carpetas literales solo se pueden borrar con la ruta \\?\ .
+    try {
+      fs.rmdirSync(linkToDotSpace)
+    } catch {}
+    for (const n of ['Docs.', '. ']) {
+      try {
+        fs.rmdirSync(`${lit}\\${n}`)
+      } catch {}
+    }
+    fs.rmSync(base, { recursive: true, force: true })
+  })
+
+  it.runIf(IS_WIN)('las carpetas literales existen de verdad (precondición)', () => {
+    expect(fs.statSync(`${lit}\\Docs.`).isDirectory()).toBe(true)
+    expect(fs.statSync(`${lit}\\. `).isDirectory()).toBe(true)
+  })
+
+  it.runIf(IS_WIN)('resolveProjectPath rechaza Docs. y ". " aunque exista la gemela normal', () => {
+    expect(() => resolveProjectPath(docsDot)).toThrow(ValidationError)
+    expect(() => resolveProjectPath(docsDot)).toThrow(/terminar en/)
+    expect(() => resolveProjectPath(dotSpace)).toThrow(/terminar en/)
+  })
+
+  it.runIf(IS_WIN)('revalidateProjectPath rechaza las rutas ambiguas guardadas', () => {
+    expect(() => revalidateProjectPath(docsDot)).toThrow(/no válido/)
+    expect(() => revalidateProjectPath(dotSpace)).toThrow(/no válido/)
+  })
+
+  it.runIf(IS_WIN)('assertCwdInProject las rechaza como cwd y como proyecto', () => {
+    expect(() => assertCwdInProject(normal, docsDot)).toThrow(/terminar en/)
+    expect(() => assertCwdInProject(normal, dotSpace)).toThrow(/terminar en/)
+    expect(() => assertCwdInProject(docsDot)).toThrow(/terminar en/)
+    expect(() => assertCwdInProject(dotSpace)).toThrow(/terminar en/)
+  })
+
+  it.runIf(IS_WIN)(
+    'una junction hacia la carpeta literal ". " se rechaza (ruta real ambigua)',
+    () => {
+      expect(() => resolveProjectPath(linkToDotSpace)).toThrow(/terminar en/)
+      expect(() => assertCwdInProject(normal, linkToDotSpace)).toThrow(/terminar en/)
+      expect(() => assertCwdInProject(base, linkToDotSpace)).toThrow(/terminar en/)
+    },
+  )
+
+  it.runIf(IS_WIN)('una carpeta normal sigue aceptándose', () => {
+    expect(resolveProjectPath(normal)).toBe(fs.realpathSync.native(normal))
+    expect(assertCwdInProject(normal)).toBe(fs.realpathSync.native(normal))
   })
 })

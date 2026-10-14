@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { hasAmbiguousWin32Segment, isUncPath } from '../projects/paths.ts'
 
 export const TOKEN_FILE_NAME = 'local-token'
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/
@@ -72,12 +73,32 @@ function describeError(err: unknown): string {
 }
 
 /**
+ * Defensa en profundidad antes de llamar a icacls (que usa la API Win32 sin `\\?\`):
+ * `true` si icacls podría acabar en un objeto distinto del que abrió Node. Lo es si la
+ * ruta (dada o real) es UNC/de dispositivo o tiene segmentos que Windows recorta (punto o
+ * espacio final) o un `:` extra, o si su ruta real no coincide (sin distinguir mayúsculas)
+ * con la real de su carpeta padre más su nombre: el último segmento es un enlace o Windows
+ * lo normaliza a otro nombre. Se compara contra la real del padre, y no contra la ruta
+ * tal cual, para tolerar nombres cortos 8.3 en los ancestros (p. ej. `C:\Users\RUNNER~1`
+ * en el %TEMP% del CI), que Win32 resuelve al mismo objeto; los ancestros ya se validaron
+ * en `assertSafeDataDir`. Lanza si la ruta no existe.
+ */
+function isAmbiguousAclTarget(target: string): boolean {
+  if (isUncPath(target) || hasAmbiguousWin32Segment(target)) return true
+  const real = fs.realpathSync.native(target)
+  if (isUncPath(real) || hasAmbiguousWin32Segment(real)) return true
+  const expected = path.join(fs.realpathSync.native(path.dirname(target)), path.basename(target))
+  return real.toLowerCase() !== expected.toLowerCase()
+}
+
+/**
  * Deja un archivo o carpeta accesible solo para el usuario actual. Idempotente.
  * - win32: `icacls` quita la herencia, concede control total al SID del usuario
  *   (sintaxis `*S-1-...`, inmune a espacios/acentos en el nombre) y retira grupos amplios.
  *   En carpetas el permiso se concede con `(OI)(CI)` para que lo hereden los hijos.
  * - POSIX: `chmod 600` en archivos y `700` en carpetas (cubre lo que ya existía).
- * Si falla, avisa por `onWarning` pero no lanza: el motor sigue arrancando.
+ * Si falla, avisa por `onWarning` pero no lanza: el motor sigue arrancando. En win32, si
+ * la ruta es ambigua (`isAmbiguousAclTarget`) no llama a icacls y solo avisa.
  */
 function restrictToCurrentUser(
   target: string,
@@ -92,6 +113,19 @@ function restrictToCurrentUser(
     } catch (err) {
       warn(`no se pudieron restringir los permisos de ${target}: ${describeError(err)}`)
     }
+    return
+  }
+  let ambiguous: boolean
+  try {
+    ambiguous = isAmbiguousAclTarget(target)
+  } catch (err) {
+    warn(`no se pudo comprobar la ruta ${target}: ${describeError(err)}; no se cambió su ACL`)
+    return
+  }
+  if (ambiguous) {
+    warn(
+      `la ruta ${target} es ambigua para Windows (enlace, punto o espacio final, o ":"): no se cambió su ACL`,
+    )
     return
   }
   const exec = opts.exec ?? defaultExec
@@ -111,16 +145,65 @@ function restrictToCurrentUser(
   }
 }
 
+/** Archivos que el motor crea en `dataDir`: la base SQLite (con su WAL) y el token. */
+export const ENGINE_DATA_FILES: readonly string[] = [
+  'data.db',
+  'data.db-wal',
+  'data.db-shm',
+  TOKEN_FILE_NAME,
+]
+
+/** `true` si la carpeta está vacía o solo contiene archivos del motor. */
+function holdsOnlyEngineFiles(dir: string, platform: NodeJS.Platform): boolean {
+  const norm = (name: string) => (platform === 'win32' ? name.toLowerCase() : name)
+  const allowed = new Set(ENGINE_DATA_FILES.map(norm))
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .every((entry) => entry.isFile() && allowed.has(norm(entry.name)))
+}
+
 /**
  * Crea `dataDir` si no existe y lo deja accesible solo para el usuario actual, con
  * herencia a lo que se cree dentro (`data.db`, sus `-wal`/`-shm`, el token). Debe
- * llamarse ANTES de abrir la base y el token: así nacen ya con la ACL privada aunque
- * `CDM_DATA_DIR` apunte a una carpeta compartida, y no queda ventana entre crear el
- * archivo y protegerlo. Mismo manejo que el token: avisa sin datos sensibles y no lanza.
+ * llamarse ANTES de abrir la base y el token: así nacen ya con la ACL privada y no queda
+ * ventana entre crear el archivo y protegerlo.
+ *
+ * La ACL de la carpeta solo se reescribe si el motor la creó en este arranque, o si ya
+ * existía vacía o con solo archivos del motor (`ENGINE_DATA_FILES`): `CDM_DATA_DIR`
+ * podría apuntar a una carpeta con datos ajenos y quitarles la herencia y los permisos
+ * de otros usuarios sería destructivo. En ese caso no se toca y se avisa (sin nombrar su
+ * contenido) para que se use una carpeta dedicada; el archivo del token se sigue
+ * protegiendo igual en `getOrCreateLocalToken`. Mismo manejo que el token: avisa sin
+ * datos sensibles y no lanza por fallos de la ACL.
  */
 export function restrictDataDir(dataDir: string, opts: LocalTokenOptions = {}): void {
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 })
-  restrictToCurrentUser(path.resolve(dataDir), 'dir', opts)
+  const target = path.resolve(dataDir)
+  // Antes de crearla: Node crearía `x.` o `. ` literalmente y icacls tocaría otra carpeta.
+  if (hasAmbiguousWin32Segment(dataDir) || hasAmbiguousWin32Segment(target)) {
+    opts.onWarning?.(
+      `la ruta de la carpeta de datos ${target} es ambigua para Windows (punto o espacio final, o ":"): no se creó ni se cambió su ACL`,
+    )
+    return
+  }
+  const created = fs.mkdirSync(target, { recursive: true, mode: 0o700 }) !== undefined
+  if (!created) {
+    let dedicated: boolean
+    try {
+      dedicated = holdsOnlyEngineFiles(target, opts.platform ?? process.platform)
+    } catch (err) {
+      opts.onWarning?.(
+        `no se pudo revisar el contenido de la carpeta de datos ${target}: ${describeError(err)}; no se cambió su ACL`,
+      )
+      return
+    }
+    if (!dedicated) {
+      opts.onWarning?.(
+        `la carpeta de datos ${target} contiene archivos ajenos al motor: no se cambió su ACL. El token sigue protegido; usa una carpeta dedicada (CDM_DATA_DIR) para proteger también la base.`,
+      )
+      return
+    }
+  }
+  restrictToCurrentUser(target, 'dir', opts)
 }
 
 /**

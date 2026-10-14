@@ -43,8 +43,10 @@ implementado Y verificado, no solo escrito.
 - [x] P2 re-auditoría: drenaje — cerrar/abortar al vencer la espera; stop y shutdown cubren `draining`; tope en `idle()`
 - [x] P2 re-auditoría: filtrar por `workspaceId` en setAgentStatus/setAgentSession/setRunStatus/setRunTotals
 - [x] P2 re-auditoría: ACL de la carpeta `dataDir` completa (no solo del archivo del token)
-- [ ] P2 verificación: el tope de costo al reanudar no cuenta ejecuciones cerradas sin `result` (costo nulo); guardar el presupuesto concedido y contar un costo nulo como ese presupuesto
-- [ ] P2 verificación: `restrictDataDir` solo debe aplicar la ACL a una carpeta creada por el motor o vacía; rechazar un `CDM_DATA_DIR` que sea o contenga la carpeta de usuario o la raíz
+- [x] P2 verificación: el tope de costo al reanudar no cuenta ejecuciones cerradas sin `result` (costo nulo); guardar el presupuesto concedido y contar un costo nulo como ese presupuesto
+- [x] P2 verificación: `restrictDataDir` solo debe aplicar la ACL a una carpeta creada por el motor o vacía; rechazar un `CDM_DATA_DIR` que sea o contenga la carpeta de usuario o la raíz
+- [x] `stop` sobre una ejecución pausada deja el run en `stopped` (consistencia del historial)
+- [x] P1 auditoría (N2-bis): rechazar segmentos de ruta que terminan en `.`/espacio o con `:` fuera de la unidad (Windows los normaliza a otra carpeta) en `CDM_DATA_DIR`, proyectos y cwd; no aplicar ACL a rutas ambiguas ni a enlaces
 
 ## Frontend
 
@@ -79,6 +81,7 @@ implementado Y verificado, no solo escrito.
 - [x] ACL del token: argumentos correctos y sin shell, manejo de fallo sin filtrar el token, y test real en Windows de que solo el usuario actual tiene acceso
 - [x] Re-auditoría completa del módulo tras las correcciones posteriores a la primera auditoría — APROBADO CON OBSERVACIONES (2026-10-14), sin P0/P1
 - [x] Auditoría de verificación de los 7 P2 de la re-auditoría — APROBADO CON OBSERVACIONES (2026-10-14), sin P0/P1
+- [x] Auditoría final de N1, N2 y N2-bis — APROBADO (2026-10-14), sin hallazgos
 
 ## E2E
 

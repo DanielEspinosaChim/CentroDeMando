@@ -13,11 +13,38 @@ export interface RunTotals {
   contextUsedPct: number
 }
 
+/** Gasto de una ejecución de la sesión: costo reportado y presupuesto concedido (internos). */
+export interface RunSpend {
+  /** `null` si la ejecución no llegó a reportar costo (p. ej. cerrada a la fuerza). */
+  costUsd: number | null
+  /** `maxBudgetUsd` concedido; `null` en filas anteriores a la migración 4. */
+  budgetUsd: number | null
+}
+
 /**
  * Acceso a datos. Toda lectura/escritura de proyectos y agentes filtra por
  * `workspaceId` (checklist de seguridad, punto 3). Solo consultas Drizzle parametrizadas.
  */
 export function createStore(db: Db, now: () => number = Date.now) {
+  /**
+   * Costo y presupuesto (en orden cronológico) de las ejecuciones de la sesión actual
+   * del agente: desde su último inicio no reanudado (incluido) hasta la más reciente.
+   */
+  function sessionRunSpend(workspaceId: string, agentId: string): RunSpend[] {
+    const rows = db
+      .select({ costUsd: runs.costUsd, budgetUsd: runs.budgetUsd, resumed: runs.resumed })
+      .from(runs)
+      .where(and(eq(runs.workspaceId, workspaceId), eq(runs.agentId, agentId)))
+      .orderBy(desc(runs.startedAt), desc(runs.id))
+      .all()
+    const spend: RunSpend[] = []
+    for (const row of rows) {
+      spend.push({ costUsd: row.costUsd, budgetUsd: row.budgetUsd })
+      if (!row.resumed) break
+    }
+    return spend.reverse()
+  }
+
   return {
     createProject(workspaceId: string, name: string, path: string): Project {
       const row = { id: ulid(), workspaceId, name, path, createdAt: now() }
@@ -111,6 +138,7 @@ export function createStore(db: Db, now: () => number = Date.now) {
       prompt: string,
       model: ModelTier,
       resumed = false,
+      budgetUsd: number | null = null,
     ): Run {
       const row: Run = {
         id: ulid(),
@@ -126,7 +154,7 @@ export function createStore(db: Db, now: () => number = Date.now) {
         endedAt: null,
       }
       db.insert(runs)
-        .values({ ...row, workspaceId, resumed })
+        .values({ ...row, workspaceId, resumed, budgetUsd })
         .run()
       return row
     },
@@ -145,24 +173,11 @@ export function createStore(db: Db, now: () => number = Date.now) {
         .run()
     },
 
-    /**
-     * `costUsd` (en orden cronológico) de las ejecuciones de la sesión actual del agente:
-     * desde su último inicio no reanudado (incluido) hasta la más reciente. `null` si la
-     * ejecución no llegó a reportar costo.
-     */
+    sessionRunSpend,
+
+    /** Solo los `costUsd` de `sessionRunSpend` (`null` si la ejecución no reportó costo). */
     sessionRunCosts(workspaceId: string, agentId: string): Array<number | null> {
-      const rows = db
-        .select({ costUsd: runs.costUsd, resumed: runs.resumed })
-        .from(runs)
-        .where(and(eq(runs.workspaceId, workspaceId), eq(runs.agentId, agentId)))
-        .orderBy(desc(runs.startedAt), desc(runs.id))
-        .all()
-      const costs: Array<number | null> = []
-      for (const row of rows) {
-        costs.push(row.costUsd)
-        if (!row.resumed) break
-      }
-      return costs.reverse()
+      return sessionRunSpend(workspaceId, agentId).map((r) => r.costUsd)
     },
 
     lastRun(workspaceId: string, agentId: string): Run | undefined {
@@ -174,7 +189,7 @@ export function createStore(db: Db, now: () => number = Date.now) {
         .limit(1)
         .get()
       if (!row) return undefined
-      const { workspaceId: _ws, resumed: _resumed, ...run } = row
+      const { workspaceId: _ws, resumed: _resumed, budgetUsd: _budget, ...run } = row
       return run
     },
 
