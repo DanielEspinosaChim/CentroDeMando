@@ -76,8 +76,7 @@ export function assertSafeDataDir(dataDir: string, homeDir: string = os.homedir(
       `Carpeta de datos (CDM_DATA_DIR) no válida: ${why}. Usa una carpeta dedicada al motor.`,
     )
   const resolved = path.resolve(dataDir)
-  const real = realOrResolved(resolved)
-  for (const p of [dataDir, resolved, real]) {
+  const checkText = (p: string) => {
     if (isUncPath(p)) throw bad('no se admiten rutas de red (UNC) ni de dispositivo')
     // Node crea `<home>\. ` o `Documents.` literalmente, pero icacls los recorta y
     // reescribiría la ACL del perfil o de `Documents` (ver hasAmbiguousWin32Segment).
@@ -87,6 +86,12 @@ export function assertSafeDataDir(dataDir: string, homeDir: string = os.homedir(
       )
     }
   }
+  // Primero solo por texto: resolver con realpath una ruta `\\servidor\recurso` hace que
+  // Windows intente conectarse al servidor (lento y, si es hostil, filtra el hash NTLM).
+  checkText(dataDir)
+  checkText(resolved)
+  const real = realOrResolved(resolved)
+  checkText(real)
   const home = realOrResolved(homeDir)
   for (const p of [resolved, real]) {
     if (path.parse(p).root === p || path.dirname(p) === p) {
