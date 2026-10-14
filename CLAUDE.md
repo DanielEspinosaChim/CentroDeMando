@@ -13,12 +13,14 @@ herramienta personal del fundador (Windows); después, producto de pago.
 
 ## Comandos
 
-<!-- REVISAR: comandos propuestos; confirmar al crear el monorepo -->
-- `pnpm dev`    — arranca motor (`apps/engine`) e interfaz (`apps/ui`) en local
-- `pnpm test`   — ejecuta los tests con Vitest (deben pasar antes de cada commit)
-- `pnpm e2e`    — ejecuta los E2E con Playwright
-- `pnpm lint`   — revisa estilo y formato con Biome (antes de cada PR)
-- `pnpm build`  — compila todos los paquetes para producción
+- `pnpm dev`        — arranca el motor (`apps/engine`) en local
+- `pnpm test`       — Vitest en todo el monorepo (deben pasar antes de cada commit)
+- `pnpm typecheck`  — `tsc --noEmit` en cada paquete
+- `pnpm lint`       — Biome (antes de cada PR)
+- `pnpm --filter engine smoke`      — humo con `FakeAgentRunner` (sin gastar tokens)
+- `pnpm --filter engine live-check` — prueba MANUAL con el SDK real (gasta ~US$0.02; nunca en CI)
+- `python scripts/trazabilidad.py --check` — cada criterio de aceptación tiene su test
+- `pnpm e2e`        — Playwright (cuando exista `apps/ui`, feature 006)
 
 ## Estructura del proyecto
 
@@ -72,6 +74,61 @@ herramienta personal del fundador (Windows); después, producto de pago.
   se tomaron. Antes de empezar una tarea nueva, revisa `docs/` primero —
   si el contexto ya está documentado ahí, no me lo vuelvas a preguntar.
 
+## Una rama por feature
+
+Modo: **con remoto** (PR en GitHub, `origin` = DanielEspinosaChim/CentroDeMando).
+
+1. **Primero la spec.** `spec.md`, `plan.md` y `tasks.md` en `spec/features/NNN-nombre/`, revisados hasta LISTO PARA IMPLEMENTAR y aprobados por mí. Sin eso no se toca código.
+2. **Al aprobarla, la rama sale de `main` limpio y actualizado:**
+   ```bash
+   git checkout main && git pull && git status   # main limpio
+   git checkout -b feat/NNN-nombre-corto         # mismo nombre que la carpeta de la spec
+   ```
+3. **Todo el trabajo de la feature vive en esa rama:** spec, plan, tasks, código, tests y docs. Un commit por avance lógico que ya funciona (no por cada tarea ni un commit gigante al final), nunca con tests en rojo, en Conventional Commits (`feat:`, `fix:`, `test:`, `docs:`, `refactor:`, `chore:`).
+4. **Una feature a la vez, cada una desde `main`.** Las features comparten `manager.ts`, `events.ts` y las migraciones de la base: no se abre una rama nueva sobre otra feature a medias.
+5. **Antes de integrar:** todos los criterios cubiertos, tests en verde, CI en verde y auditoría de seguridad hecha según el nivel de riesgo. Primero se trae `main` a la rama (`git merge main`); si hay conflictos se resuelven ahí y se vuelven a correr **todos** los tests.
+6. **Integrar a `main` requiere mi OK explícito para ESE merge**, aunque todo esté en verde. "Adelante con la feature" no es OK para el merge. `/pr` abre el PR y el merge se hace en GitHub (sin squash).
+7. **Confirmar que `main` quedó bien** (tests y CI). Si algo truena, se revierte el merge (`git revert -m 1 <merge>`), no se parchea encima.
+8. **Borrar la rama** solo después del paso 7, y marcar la feature completa en `spec/constitution/roadmap.md` en el mismo cierre.
+
+**Nunca:** comitear en `main` durante una feature, `merge --squash`, ni borrar la rama antes de confirmar que `main` pasa los tests.
+
+**Si un bug se escapa a `main`:** rama `fix/NNN-descripcion-corta`, el mismo flujo, y el fix incluye un test que reproduce el bug y falla sin el fix.
+
+El hook `git-flow-guard` pide mi confirmación antes de cualquier merge o commit directo en `main` y bloquea `merge --squash`; `pre-commit` (`no-commit-to-branch`) y `guard-destructive` bloquean commits y push a `main`. La feature 001 se integró directo a `main` antes de adoptar este flujo; no se reescribe ese historial.
+
+## Proporcionalidad (ahorra tokens y tiempo)
+
+El esfuerzo va según el tamaño y el riesgo; cada `spec.md` declara su nivel.
+
+| Nivel | Ejemplos | Qué haces |
+| --- | --- | --- |
+| Chico | Bug evidente, un archivo, ajuste de texto o config | Tú cubres los 4 roles en una pasada: test + lint + tipos y revisión propia. **Sin subagentes.** |
+| Mediano | Feature de varios archivos, lógica nueva | **Los 4 roles:** `coordinador` ordena y asigna → `implementador` construye con test primero → al final `qa-tester` y `auditor-seguridad` en paralelo. |
+| Crítico | Seguridad, permisos, credenciales, pagos, multi-tenant, migraciones, prompts/mensajes entre agentes, aprobaciones | Los 4 roles, con el `auditor-seguridad` revisando el checklist completo (`opus`). |
+
+Varios `implementador` en paralelo solo con tareas `[P]` independientes y largas, y que no toquen los mismos archivos. Un hallazgo P0/P1 del auditor o un criterio que QA no puede probar bloquea el cierre. Corre solo los tests de lo que tocaste mientras trabajas y la suite completa una vez al final.
+
+## Pruebas automáticas (corren solas, no gastan tokens)
+
+- **Unitarias e integración:** todo código nuevo lleva su test, con `FakeAgentRunner`.
+- **Por criterio:** cada test que prueba un criterio de aceptación lleva su ID en el nombre o en un comentario (`C001-3` = feature 001, criterio 3). `scripts/trazabilidad.py --check` falla si un criterio de una feature en implementación no tiene test; `docs/trazabilidad.md` se regenera con `--escribir` y no se edita a mano.
+- **No debilites tests para que pasen.** Un hook pide confirmación si quitas asserts, marcas tests como skip/only o cambias un valor esperado en un test ya commiteado. Si un test commiteado falla, lo normal es que el código esté mal; el test solo cambia si cambió la spec.
+
+## Terminado significa
+
+1. `pnpm test`, `pnpm lint` y `pnpm typecheck` en verde, y pegas la salida real en tu resumen.
+2. Cada criterio de aceptación tocado tiene un test con su ID (`C<NNN>-<n>`) y `python scripts/trazabilidad.py --check` pasa.
+3. Las tareas de `tasks.md` están marcadas `[x]` solo si están implementadas y verificadas.
+4. CI de GitHub en verde en el PR.
+5. Si algo no se verificó, lo dices explícitamente. Nunca reportes trabajo sin evidencia de esta sesión.
+
+## Comandos del flujo
+
+- `/nueva-feature <idea>` — spec, plan y tasks en `spec/features/` con revisión LISTO PARA IMPLEMENTAR.
+- `/implementar spec/features/NNN-nombre` — rama `feat/NNN-nombre`, tarea por tarea con test primero.
+- `/arreglar-issue <n>`, `/depurar <síntoma>`, `/revisar`, `/verificar`, `/pr`, `/explorar-repo`.
+
 ## Subagentes disponibles
 
 Definidos en `.claude/agents/`. El modelo de la definición es el valor por
@@ -84,6 +141,13 @@ defecto; se puede sobrescribir por invocación según el tamaño de la tarea.
 - **auditor-seguridad** (opus): solo lectura. Audita contra `spec/features/000-seguridad-transversal/spec.md` y reporta P0/P1/P2.
 - **disenador-ui** (sonnet): animaciones, transiciones y fidelidad visual. Solo escribe en `apps/ui/src/` (componentes, estilos, shaders).
 - **documentador** (haiku): mantiene `docs/` y READMEs. Solo escribe en `docs/` y archivos `README.md`.
+- **code-reviewer**: revisión de código del arnés SDD (`/revisar`); se usa según la tabla de Proporcionalidad.
+
+Están definidos para cuando hagan falta; úsalos según la tabla de Proporcionalidad, no en cada cambio.
+
+## Reglas por tema
+
+En `.claude/rules/`; se cargan solas al tocar archivos que coinciden: `revision.md` y `stacks/typescript`, `stacks/react`.
 
 ## MCPs configurados
 

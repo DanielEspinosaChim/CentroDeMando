@@ -1,5 +1,9 @@
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
-  test: { name: 'engine', include: ['src/**/*.test.ts', 'test/**/*.test.ts'] },
+  test: {
+    name: 'engine',
+    include: ['src/**/*.test.ts', 'test/**/*.test.ts'],
+    setupFiles: ['test/setup.ts'],
+  },
 })
