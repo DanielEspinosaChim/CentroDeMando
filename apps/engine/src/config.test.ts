@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { assertSafeDataDir, loadConfig } from './config.ts'
 
 let base: string
@@ -36,6 +36,20 @@ describe('assertSafeDataDir', () => {
     expect(() => assertSafeDataDir('\\\\servidor\\recurso\\datos', home)).toThrow(/UNC/)
     expect(() => assertSafeDataDir('//servidor/recurso/datos', home)).toThrow(/UNC/)
     expect(() => assertSafeDataDir('\\\\?\\C:\\datos', home)).toThrow(/UNC/)
+  })
+
+  it('rechaza una ruta UNC sin tocar el sistema de archivos (no abre conexiones de red)', () => {
+    // Resolver `\\servidor\recurso` con realpath hace que Windows intente conectarse al
+    // servidor: lento y, con un servidor hostil, filtra el hash NTLM del usuario.
+    const spy = vi.spyOn(fs.realpathSync, 'native')
+    try {
+      for (const unc of ['\\\\servidor\\recurso\\datos', '//servidor/recurso/datos']) {
+        expect(() => assertSafeDataDir(unc, home)).toThrow(/UNC/)
+      }
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('rechaza un enlace que apunta a la carpeta de usuario', () => {

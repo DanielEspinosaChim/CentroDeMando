@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { RunnerError } from './runner.ts'
 import fixtures from './sdk-messages.fixture.json' with { type: 'json' }
 import recording from './sdk-recording.fixture.json' with { type: 'json' }
@@ -165,6 +165,24 @@ describe('createPreToolUseHook', () => {
     expect(await decision('Glob', { pattern: 'src/**/*.ts' })).toBeUndefined()
     // En Grep `pattern` es una regex del contenido: puede llevar "..".
     expect(await decision('Grep', { pattern: 'a\\.\\.b' })).toBeUndefined()
+  })
+
+  it('deniega rutas UNC pedidas por el agente sin tocar el disco (ni la red)', async () => {
+    // Resolver `\\evil\share\x` con realpath hace que Windows se conecte a ese servidor:
+    // un agente con inyección de prompt podría filtrar el hash NTLM del usuario.
+    const spy = vi.spyOn(fs.realpathSync, 'native')
+    try {
+      for (const tool of ['Read', 'Glob', 'Grep']) {
+        for (const key of ['file_path', 'path']) {
+          expect(await decision(tool, { [key]: '\\\\evil\\share\\x' })).toBe('deny')
+          expect(await decision(tool, { [key]: '//evil/share/x' })).toBe('deny')
+          expect(await decision(tool, { [key]: '\\\\?\\C:\\Users' })).toBe('deny')
+        }
+      }
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('deniega rutas absolutas fuera y enlaces que salen del proyecto', async () => {
