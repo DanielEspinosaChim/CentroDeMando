@@ -12,6 +12,10 @@ export interface EngineConfig {
   readonly maxTurns: number
   /** Tope de costo estimado por tarea en USD (checklist de seguridad, punto D). */
   readonly maxCostUsdPerTask: number
+  /** Escrituras generales por workspace y minuto (POST /projects, POST/DELETE /agents). */
+  readonly rateLimitWritesPerMin: number
+  /** Acciones por agente y minuto (tasks y resume, que lanzan un proceso). pause/stop no se limitan. */
+  readonly rateLimitAgentActionsPerMin: number
   /** Carpeta de datos: base SQLite y token local. */
   readonly dataDir: string
   /** Fase 1: un solo workspace local. */
@@ -23,6 +27,8 @@ export const DEFAULT_UI_ORIGIN = 'http://localhost:5173'
 export const DEFAULT_MAX_CONCURRENT_AGENTS = 5
 export const DEFAULT_MAX_TURNS = 40
 export const DEFAULT_MAX_COST_USD_PER_TASK = 2
+export const DEFAULT_RATE_LIMIT_WRITES_PER_MIN = 60
+export const DEFAULT_RATE_LIMIT_AGENT_ACTIONS_PER_MIN = 10
 export const LOCAL_WORKSPACE_ID = 'local'
 
 function defaultDataDir(env: NodeJS.ProcessEnv): string {
@@ -65,6 +71,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): EngineConfig {
       env.CDM_MAX_COST_USD_PER_TASK,
       DEFAULT_MAX_COST_USD_PER_TASK,
       'CDM_MAX_COST_USD_PER_TASK',
+    ),
+    rateLimitWritesPerMin: positiveInt(
+      env.CDM_RATE_LIMIT_WRITES_PER_MIN,
+      DEFAULT_RATE_LIMIT_WRITES_PER_MIN,
+      'CDM_RATE_LIMIT_WRITES_PER_MIN',
+    ),
+    rateLimitAgentActionsPerMin: positiveInt(
+      env.CDM_RATE_LIMIT_AGENT_ACTIONS_PER_MIN,
+      DEFAULT_RATE_LIMIT_AGENT_ACTIONS_PER_MIN,
+      'CDM_RATE_LIMIT_AGENT_ACTIONS_PER_MIN',
     ),
     dataDir: env.CDM_DATA_DIR ? path.resolve(env.CDM_DATA_DIR) : defaultDataDir(env),
     workspaceId: LOCAL_WORKSPACE_ID,

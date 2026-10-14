@@ -10,6 +10,7 @@ import { agentRoutes } from './routes/agents.ts'
 import { projectRoutes } from './routes/projects.ts'
 import { wsRoutes } from './routes/ws.ts'
 import { registerGuards } from './security/guards.ts'
+import { createRateLimits } from './security/rate-limit.ts'
 
 export interface BuildServerOptions {
   config: EngineConfig
@@ -19,6 +20,8 @@ export interface BuildServerOptions {
   /** Destino del log (tests). Por defecto, stdout. */
   logStream?: NodeJS.WritableStream
   logLevel?: string
+  /** Reloj del rate limit en ms (tests). Por defecto, `Date.now`. */
+  now?: () => number
 }
 
 export interface Engine {
@@ -66,9 +69,15 @@ export async function buildServer(opts: BuildServerOptions): Promise<Engine> {
     },
   })
 
+  const limits = createRateLimits({
+    writesPerWindow: opts.config.rateLimitWritesPerMin,
+    agentActionsPerWindow: opts.config.rateLimitAgentActionsPerMin,
+    now: opts.now,
+  })
+
   app.get('/health', async () => ({ ok: true }))
-  projectRoutes(app, opts.store, opts.config.dataDir)
-  agentRoutes(app, manager)
+  projectRoutes(app, opts.store, opts.config.dataDir, limits)
+  agentRoutes(app, manager, limits)
   wsRoutes(app, hub, opts.token)
 
   app.addHook('onClose', async () => {

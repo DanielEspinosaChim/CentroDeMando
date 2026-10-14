@@ -11,11 +11,17 @@ import {
 } from '@cdm/shared'
 import type { FastifyBaseLogger } from 'fastify'
 import type { EngineConfig } from '../config.ts'
-import type { Store } from '../db/store.ts'
+import type { RunTotals, Store } from '../db/store.ts'
 import { ConflictError, LimitError, NotFoundError, ValidationError } from '../errors/index.ts'
 import type { EventHub } from '../events/hub.ts'
-import { assertCwdInProject } from '../projects/paths.ts'
-import type { AgentRunner, RunHandle, RunnerEvent } from './runner.ts'
+import { assertCwdInProject, revalidateProjectPath } from '../projects/paths.ts'
+import {
+  type AgentRunner,
+  type RunHandle,
+  RunnerError,
+  type RunnerEvent,
+  type UsageEvent,
+} from './runner.ts'
 
 /** Transiciones permitidas de la máquina de estados del agente. */
 const TRANSITIONS: Record<AgentStatus, readonly AgentStatus[]> = {
@@ -39,8 +45,44 @@ export const LIMIT_MESSAGES = {
   turns: 'La tarea alcanzó el tope de turnos y se detuvo.',
   budget: 'La tarea alcanzó el tope de costo y se detuvo.',
 } as const
-/** Tiempo máximo que pausa/stop esperan a que el proceso del SDK termine. */
+export const BUDGET_EXHAUSTED_MESSAGE =
+  'La sesión ya agotó el tope de costo por tarea; inicia una tarea nueva para continuar.'
+/** Tiempo máximo que pausa/stop esperan a que el proceso del SDK termine; luego se fuerza el cierre. */
 const DRAIN_TIMEOUT_MS = 5000
+/** Tope por defecto de `idle()`: nunca se espera indefinidamente a los consumidores. */
+const IDLE_TIMEOUT_MS = 10_000
+/** Tope de `idle()` durante el apagado, tras forzar el cierre de todo (Ctrl+C no se cuelga). */
+const SHUTDOWN_IDLE_TIMEOUT_MS = 3000
+/**
+ * Saldo mínimo para reanudar. El SDK revisa el tope al final de cada turno, así que con
+ * un saldo de centavos la reanudación solo serviría para pasarse del tope un turno más.
+ */
+const MIN_RESUME_BUDGET_USD = 0.01
+
+/**
+ * Gasto real (USD) de una sesión a partir del `costUsd` reportado por cada ejecución
+ * (orden cronológico, desde el último inicio no reanudado).
+ *
+ * Decisión (ver `sdk.d.ts`, `total_cost_usd` y `maxBudgetUsd`): el SDK documenta que una
+ * sesión reanudada "continúa desde el total que guardó su transcript, cuando lo tiene",
+ * es decir, el `total_cost_usd` de una reanudación ya incluye lo gastado antes, mientras
+ * que `maxBudgetUsd` cuenta solo lo gastado desde esa llamada a `query()`. Sumar los
+ * costos tal cual contaría doble. Por eso cada costo se trata como acumulado de la
+ * sesión: se suma solo lo que crece respecto al último reportado. Si un costo baja
+ * (el transcript no tenía total y el contador empezó de cero), esa ejecución se suma
+ * entera. Las ejecuciones sin costo (`null`, cerradas antes de su `result`) no aportan:
+ * su gasto no es medible desde aquí.
+ */
+export function sessionSpentUsd(costs: ReadonlyArray<number | null>): number {
+  let spent = 0
+  let lastReported = 0
+  for (const cost of costs) {
+    if (cost === null || !Number.isFinite(cost) || cost < 0) continue
+    spent += cost >= lastReported ? cost - lastReported : cost
+    lastReported = cost
+  }
+  return spent
+}
 
 type EndReason = 'paused' | 'stopped'
 
@@ -63,7 +105,8 @@ export interface AgentManagerDeps {
   store: Store
   runner: AgentRunner
   hub: EventHub
-  config: Pick<EngineConfig, 'maxConcurrentAgents' | 'maxTurns' | 'maxCostUsdPerTask'>
+  /** `dataDir` hace falta para revalidar el proyecto al lanzar (mismas reglas que al registrar). */
+  config: Pick<EngineConfig, 'maxConcurrentAgents' | 'maxTurns' | 'maxCostUsdPerTask' | 'dataDir'>
   logger: FastifyBaseLogger
   /** Textos a ocultar si aparecen en mensajes que van al log (p. ej. el token local). */
   secrets?: readonly string[]
@@ -112,7 +155,13 @@ export class AgentManager {
   startTask(workspaceId: string, agentId: string, input: StartTaskInput): Run {
     const agent = this.requireAgent(workspaceId, agentId)
     this.assertCanLaunch(agent)
-    return this.launch(workspaceId, agent, input.prompt, input.model ?? agent.defaultModel)
+    return this.launch(
+      workspaceId,
+      agent,
+      input.prompt,
+      input.model ?? agent.defaultModel,
+      this.deps.config.maxCostUsdPerTask,
+    )
   }
 
   async pause(workspaceId: string, agentId: string): Promise<Agent> {
@@ -134,13 +183,22 @@ export class AgentManager {
     const agent = this.requireAgent(workspaceId, agentId)
     if (agent.status !== 'paused') throw new ConflictError('El agente no está en pausa')
     if (!agent.sdkSessionId) throw new ConflictError('No hay sesión guardada para reanudar')
+    // Tras `assertCanLaunch` no queda nada drenando: los costos de la sesión ya son finales.
     this.assertCanLaunch(agent)
+    // El tope de costo es por tarea (toda la sesión), no por `query()`: pausar/reanudar
+    // N veces no puede dar N topes. Sin saldo se responde 409 (ConflictError) y no 429
+    // (LimitError): no es un límite temporal que se libere esperando, sino el estado de
+    // esta sesión; reintentar no sirve y la salida es iniciar una tarea nueva.
+    const spent = sessionSpentUsd(this.deps.store.sessionRunCosts(workspaceId, agent.id))
+    const remaining = this.deps.config.maxCostUsdPerTask - spent
+    if (remaining < MIN_RESUME_BUDGET_USD) throw new ConflictError(BUDGET_EXHAUSTED_MESSAGE)
     const model = this.deps.store.lastRun(workspaceId, agent.id)?.model ?? agent.defaultModel
     return this.launch(
       workspaceId,
       agent,
       input.prompt ?? DEFAULT_RESUME_PROMPT,
       model,
+      remaining,
       agent.sdkSessionId,
     )
   }
@@ -160,9 +218,17 @@ export class AgentManager {
       live.handle.close()
       await this.waitDrained(live)
     } else if (agent.status === 'paused') {
-      this.deps.store.setAgentStatus(agent.id, 'stopped')
+      // La ejecución pausada puede seguir drenando (el proceso no terminó tras interrumpir):
+      // detener debe cerrarla de verdad, no solo cambiar el estado.
+      const draining = this.draining.get(agent.id)
+      if (draining) {
+        draining.ended = 'stopped'
+        this.forceClose(draining)
+      }
+      this.deps.store.setAgentStatus(workspaceId, agent.id, 'stopped')
       const lastRun = this.deps.store.lastRun(workspaceId, agent.id)
       if (lastRun) this.emit(workspaceId, statusEvent(agent.id, lastRun.id, 'stopped'))
+      if (draining) await this.waitDrained(draining)
     } else {
       throw new ConflictError('El agente no está ejecutando ni en pausa')
     }
@@ -174,17 +240,44 @@ export class AgentManager {
     return this.live.size + this.draining.size
   }
 
-  /** Espera a que terminen los consumidores de eventos (tests y apagado). */
-  async idle(): Promise<void> {
-    while (this.pending.size > 0) await Promise.allSettled([...this.pending])
+  /**
+   * Espera a que terminen los consumidores de eventos (tests y apagado), como mucho
+   * `timeoutMs`. Devuelve `false` si venció el tope con consumidores pendientes.
+   */
+  async idle(timeoutMs = IDLE_TIMEOUT_MS): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    while (this.pending.size > 0) {
+      const left = deadline - Date.now()
+      if (left <= 0) return false
+      let timer: NodeJS.Timeout | undefined
+      await Promise.race([
+        Promise.allSettled([...this.pending]),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, left)
+        }),
+      ])
+      clearTimeout(timer)
+    }
+    return true
   }
 
-  /** Apagado: detiene todo lo que esté corriendo. */
+  /**
+   * Apagado: detiene en paralelo lo que esté corriendo, fuerza el cierre de lo que siga
+   * drenando (pausas incluidas) y espera con tope para que Ctrl+C no se cuelgue.
+   */
   async shutdown(): Promise<void> {
-    for (const live of [...this.live.values()]) {
-      if (!live.ended) await this.stop(live.workspaceId, live.agentId).catch(() => {})
+    await Promise.allSettled(
+      [...this.live.values()]
+        .filter((live) => !live.ended)
+        .map((live) => this.stop(live.workspaceId, live.agentId)),
+    )
+    for (const live of [...this.draining.values()]) this.forceClose(live)
+    if (!(await this.idle(SHUTDOWN_IDLE_TIMEOUT_MS))) {
+      this.deps.logger.warn(
+        { pending: this.pending.size },
+        'apagado: quedaron ejecuciones sin terminar tras forzar su cierre',
+      )
     }
-    await this.idle()
   }
 
   // --- Interno ----------------------------------------------------------------
@@ -212,15 +305,18 @@ export class AgentManager {
     agent: Agent,
     prompt: string,
     model: ModelTier,
+    maxBudgetUsd: number,
     resume?: string,
   ): Run {
     const project = this.deps.store.getProject(workspaceId, agent.projectId)
     if (!project) throw new ValidationError('projectId: el proyecto no existe')
-    const cwd = assertCwdInProject(project.path)
+    // Un proyecto guardado antes de endurecer las reglas no se usa sin revalidarlo.
+    const projectPath = revalidateProjectPath(project.path, { dataDir: this.deps.config.dataDir })
+    const cwd = assertCwdInProject(projectPath)
 
-    const run = this.deps.store.createRun(workspaceId, agent.id, prompt, model)
-    if (!resume) this.deps.store.setAgentSession(agent.id, null)
-    this.deps.store.setAgentStatus(agent.id, 'thinking')
+    const run = this.deps.store.createRun(workspaceId, agent.id, prompt, model, Boolean(resume))
+    if (!resume) this.deps.store.setAgentSession(workspaceId, agent.id, null)
+    this.deps.store.setAgentStatus(workspaceId, agent.id, 'thinking')
 
     const abort = new AbortController()
     const handle = this.deps.runner.run({
@@ -229,7 +325,7 @@ export class AgentManager {
       role: agent.role,
       cwd,
       maxTurns: this.deps.config.maxTurns,
-      maxBudgetUsd: this.deps.config.maxCostUsdPerTask,
+      maxBudgetUsd,
       signal: abort.signal,
       ...(resume ? { resume } : {}),
     })
@@ -246,7 +342,12 @@ export class AgentManager {
   private async consume(live: LiveRun): Promise<void> {
     try {
       for await (const ev of live.handle.events) {
-        if (live.ended) break
+        if (live.ended) {
+          // Tras pausa/stop se descartan los eventos tardíos, salvo el costo: se guarda
+          // (sin emitir) para que el tope de la sesión cuente lo gastado al reanudar.
+          if (ev.type === 'usage') this.saveTotals(live, ev)
+          continue
+        }
         this.onRunnerEvent(live, ev)
       }
       if (live.ended) return
@@ -257,6 +358,11 @@ export class AgentManager {
         this.finish(live, 'done')
       }
     } catch (err) {
+      // El `result` de error (p. ej. tras interrumpir) también trae costo.
+      if (err instanceof RunnerError && err.usage) {
+        if (live.ended) this.saveTotals(live, err.usage)
+        else this.onRunnerEvent(live, err.usage)
+      }
       if (live.ended) return
       this.logError(live, 'la ejecución falló', err)
       this.finish(live, 'error')
@@ -273,7 +379,7 @@ export class AgentManager {
     const base = { agentId: live.agentId, runId: live.run.id, at: Date.now() }
     switch (ev.type) {
       case 'session':
-        this.deps.store.setAgentSession(live.agentId, ev.sessionId)
+        this.deps.store.setAgentSession(live.workspaceId, live.agentId, ev.sessionId)
         return
       case 'output':
         if (live.status === 'running_tool') this.setLiveStatus(live, 'thinking')
@@ -295,24 +401,29 @@ export class AgentManager {
         live.limitHit = ev.limit
         return
       case 'usage': {
-        const totals = {
-          inputTokens: ev.inputTokens,
-          outputTokens: ev.outputTokens,
-          costUsd: ev.costUsd,
-          contextUsedPct: Math.min(100, Math.max(0, ev.contextUsedPct)),
-        }
-        this.deps.store.setRunTotals(live.run.id, totals)
+        const totals = this.saveTotals(live, ev)
         this.emit(live.workspaceId, { type: 'agent.usage', ...base, ...totals })
         return
       }
     }
   }
 
+  private saveTotals(live: LiveRun, ev: UsageEvent): RunTotals {
+    const totals = {
+      inputTokens: ev.inputTokens,
+      outputTokens: ev.outputTokens,
+      costUsd: ev.costUsd,
+      contextUsedPct: Math.min(100, Math.max(0, ev.contextUsedPct)),
+    }
+    this.deps.store.setRunTotals(live.workspaceId, live.run.id, totals)
+    return totals
+  }
+
   private setLiveStatus(live: LiveRun, status: AgentStatus): void {
     if (live.status === status || !canTransition(live.status, status)) return
     live.status = status
-    this.deps.store.setAgentStatus(live.agentId, status)
-    this.deps.store.setRunStatus(live.run.id, status, false)
+    this.deps.store.setAgentStatus(live.workspaceId, live.agentId, status)
+    this.deps.store.setRunStatus(live.workspaceId, live.run.id, status, false)
     this.emit(live.workspaceId, statusEvent(live.agentId, live.run.id, status))
   }
 
@@ -320,8 +431,8 @@ export class AgentManager {
   private finish(live: LiveRun, status: AgentStatus): void {
     if (!canTransition(live.status, status)) return
     live.status = status
-    this.deps.store.setAgentStatus(live.agentId, status)
-    this.deps.store.setRunStatus(live.run.id, status, true)
+    this.deps.store.setAgentStatus(live.workspaceId, live.agentId, status)
+    this.deps.store.setRunStatus(live.workspaceId, live.run.id, status, true)
     if ((status === 'paused' || status === 'stopped') && this.live.get(live.agentId) === live) {
       this.live.delete(live.agentId)
       this.draining.set(live.agentId, live)
@@ -329,16 +440,31 @@ export class AgentManager {
     this.emit(live.workspaceId, statusEvent(live.agentId, live.run.id, status))
   }
 
+  /** Espera a que la ejecución drene; si vence el tope, aborta y cierra el proceso. */
   private async waitDrained(live: LiveRun): Promise<void> {
     if (!live.drained) return
     let timer: NodeJS.Timeout | undefined
-    await Promise.race([
-      live.drained,
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, DRAIN_TIMEOUT_MS)
+    const timedOut = await Promise.race([
+      live.drained.then(
+        () => false,
+        () => false,
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), DRAIN_TIMEOUT_MS)
       }),
     ])
     clearTimeout(timer)
+    if (timedOut) this.forceClose(live)
+  }
+
+  /** Aborta y cierra el proceso del SDK. La sesión queda en disco: se puede reanudar. */
+  private forceClose(live: LiveRun): void {
+    live.abort.abort()
+    try {
+      live.handle.close()
+    } catch (err) {
+      this.logError(live, 'fallo al cerrar el proceso', err)
+    }
   }
 
   private emitError(live: LiveRun, message: string): void {

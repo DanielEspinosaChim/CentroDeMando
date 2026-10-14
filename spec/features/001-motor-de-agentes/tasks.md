@@ -33,6 +33,16 @@ implementado Y verificado, no solo escrito.
 - [x] Columna `workspace_id` en `runs` (migración 2) (auditoría, P2)
 - [x] `scripts/live-check.ts`: prueba manual con el SDK real (gasta tokens)
 - [x] Repo git y CI (`.github/workflows/ci.yml`, `windows-latest`)
+- [x] Rate limit propio en memoria (sin dependencias nuevas) para rutas de escritura: `POST /projects`, `POST /agents`, `DELETE /agents/:id` (límite general por workspace) y `POST /agents/:id/{tasks,resume,pause,stop}` (límite más estricto por agente, porque cada start lanza un proceso). Responde 429 con `{ error: { code: "RATE_LIMITED" } }` y cabecera `Retry-After`; límites configurables en `config.ts` (auditoría, P2, punto 7)
+- [x] ACL explícita del token local en Windows: tras escribirlo, `icacls` vía `execFile` con arreglo de argumentos (sin shell) para quitar herencia y dar acceso solo al usuario actual; si falla, aviso en el log sin el token; en POSIX se mantiene `0o600` (auditoría, P2, puntos 2 y 4)
+
+- [ ] P2 re-auditoría: stop y pause fuera del rate limit por agente (detener debe estar siempre disponible)
+- [ ] P2 re-auditoría: rechazar rutas UNC (`\\servidor\recurso`) al registrar proyectos
+- [ ] P2 re-auditoría: revalidar el proyecto al lanzar (proyectos guardados antes de las reglas nuevas)
+- [ ] P2 re-auditoría: tope de costo al reanudar = tope − lo ya gastado en la sesión
+- [ ] P2 re-auditoría: drenaje — cerrar/abortar al vencer la espera; stop y shutdown cubren `draining`; tope en `idle()`
+- [ ] P2 re-auditoría: filtrar por `workspaceId` en setAgentStatus/setAgentSession/setRunStatus/setRunTotals
+- [ ] P2 re-auditoría: ACL de la carpeta `dataDir` completa (no solo del archivo del token)
 
 ## Frontend
 
@@ -63,6 +73,9 @@ implementado Y verificado, no solo escrito.
 - [x] El token local no aparece en ningún log (captura del logger en test)
 - [x] Revisar contra `spec/features/000-seguridad-transversal/spec.md`
       antes de mergear — APROBADO CON OBSERVACIONES (2026-10-14); P1 de tope de costo corregido
+- [x] Rate limit: 429 al superar el umbral, formato del error (`RATE_LIMITED` + `Retry-After`), recuperación al pasar la ventana (reloj falso) y start/stop en bucle limitado (`FakeAgentRunner`)
+- [x] ACL del token: argumentos correctos y sin shell, manejo de fallo sin filtrar el token, y test real en Windows de que solo el usuario actual tiene acceso
+- [x] Re-auditoría completa del módulo tras las correcciones posteriores a la primera auditoría — APROBADO CON OBSERVACIONES (2026-10-14), sin P0/P1
 
 ## E2E
 

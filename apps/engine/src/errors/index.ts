@@ -48,6 +48,16 @@ export class LimitError extends AppError {
   }
 }
 
+/** Rate limit de rutas de escritura (distinto del tope de concurrencia `LimitError`). */
+export class RateLimitedError extends AppError {
+  constructor(
+    readonly retryAfterSeconds: number,
+    message = 'Demasiadas peticiones; espera antes de reintentar',
+  ) {
+    super(429, 'RATE_LIMITED', message)
+  }
+}
+
 /** Valida con Zod y convierte el fallo en `ValidationError` sin filtrar internos. */
 export function parseInput<T extends z.ZodType>(schema: T, data: unknown): z.infer<T> {
   const result = schema.safeParse(data)
@@ -66,6 +76,9 @@ export function errorBody(code: string, message: string) {
 /** Respuesta uniforme `{ error: { code, message } }`, sin stack traces ni rutas internas. */
 export function registerErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((err: FastifyError | AppError, request, reply) => {
+    if (err instanceof RateLimitedError) {
+      reply.header('retry-after', String(err.retryAfterSeconds))
+    }
     if (err instanceof AppError) {
       return reply.status(err.statusCode).send(errorBody(err.code, err.message))
     }

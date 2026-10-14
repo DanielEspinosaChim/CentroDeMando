@@ -59,6 +59,11 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE runs ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'local';
   CREATE INDEX runs_workspace_idx ON runs (workspace_id);
   `,
+  // 3: marca de reanudación para acotar el tope de costo a toda la sesión (no por query()).
+  // Las filas previas quedan como inicio de sesión (0).
+  `
+  ALTER TABLE runs ADD COLUMN resumed INTEGER NOT NULL DEFAULT 0;
+  `,
 ]
 
 function migrate(sqlite: Database.Database): void {

@@ -47,7 +47,20 @@ export interface AgentRunner {
   run(options: RunOptions): RunHandle
 }
 
-/** Fallo de una ejecución. `message` es interno: va al log, nunca al cliente. */
+export type UsageEvent = Extract<RunnerEvent, { type: 'usage' }>
+
+/**
+ * Fallo de una ejecución. `message` es interno: va al log, nunca al cliente.
+ * `usage` trae el costo que el SDK reportó en el `result` de error (p. ej. tras una
+ * pausa), para que cuente en el tope de costo de la sesión.
+ */
 export class RunnerError extends Error {
   override name = 'RunnerError'
+
+  constructor(
+    message: string,
+    readonly usage?: UsageEvent,
+  ) {
+    super(message)
+  }
 }

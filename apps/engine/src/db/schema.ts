@@ -52,6 +52,8 @@ export const runs = sqliteTable(
     contextUsedPct: real('context_used_pct'),
     startedAt: integer('started_at').notNull(),
     endedAt: integer('ended_at'),
+    /** Interno (no sale en la API): la ejecución reanudó la sesión de la anterior. */
+    resumed: integer('resumed', { mode: 'boolean' }).notNull().default(false),
   },
   (t) => [index('runs_agent_idx').on(t.agentId), index('runs_workspace_idx').on(t.workspaceId)],
 )

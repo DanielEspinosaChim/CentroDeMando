@@ -16,6 +16,7 @@ import {
   RunnerError,
   type RunnerEvent,
   type RunOptions,
+  type UsageEvent,
 } from './runner.ts'
 
 /**
@@ -204,25 +205,24 @@ export function translateSdkMessage(msg: SDKMessage, state: TranslateState): Run
     case 'result': {
       const session: RunnerEvent = { type: 'session', sessionId: msg.session_id }
       const limit = LIMIT_SUBTYPES[msg.subtype]
-      if (!limit && (msg.subtype !== 'success' || msg.is_error)) {
-        throw new RunnerError(`El SDK terminó con ${msg.subtype}`)
-      }
       const usage = (msg.usage ?? {}) as Usage
       const windows = Object.values(msg.modelUsage ?? {}).map((m) => m.contextWindow)
       const contextWindow = windows.length ? Math.max(...windows) : 0
       const pct =
         contextWindow > 0 ? Math.min(100, (state.lastContextTokens / contextWindow) * 100) : 0
-      return [
-        session,
-        {
-          type: 'usage',
-          inputTokens: contextTokens(usage),
-          outputTokens: usage.output_tokens ?? 0,
-          costUsd: msg.total_cost_usd,
-          contextUsedPct: Math.round(pct * 10) / 10,
-        },
-        ...(limit ? [{ type: 'limit', limit } as const] : []),
-      ]
+      const usageEvent: UsageEvent = {
+        type: 'usage',
+        inputTokens: contextTokens(usage),
+        outputTokens: usage.output_tokens ?? 0,
+        costUsd: msg.total_cost_usd,
+        contextUsedPct: Math.round(pct * 10) / 10,
+      }
+      if (!limit && (msg.subtype !== 'success' || msg.is_error)) {
+        // El costo viaja en el error: una pausa termina con un `result` de error y su
+        // gasto debe contar para el tope de la sesión.
+        throw new RunnerError(`El SDK terminó con ${msg.subtype}`, usageEvent)
+      }
+      return [session, usageEvent, ...(limit ? [{ type: 'limit', limit } as const] : [])]
     }
     default:
       return []

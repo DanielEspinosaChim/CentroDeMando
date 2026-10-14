@@ -91,15 +91,27 @@ export function createStore(db: Db, now: () => number = Date.now) {
         .run()
     },
 
-    setAgentStatus(agentId: string, status: AgentStatus): void {
-      db.update(agents).set({ status, updatedAt: now() }).where(eq(agents.id, agentId)).run()
+    setAgentStatus(workspaceId: string, agentId: string, status: AgentStatus): void {
+      db.update(agents)
+        .set({ status, updatedAt: now() })
+        .where(and(eq(agents.workspaceId, workspaceId), eq(agents.id, agentId)))
+        .run()
     },
 
-    setAgentSession(agentId: string, sdkSessionId: string | null): void {
-      db.update(agents).set({ sdkSessionId, updatedAt: now() }).where(eq(agents.id, agentId)).run()
+    setAgentSession(workspaceId: string, agentId: string, sdkSessionId: string | null): void {
+      db.update(agents)
+        .set({ sdkSessionId, updatedAt: now() })
+        .where(and(eq(agents.workspaceId, workspaceId), eq(agents.id, agentId)))
+        .run()
     },
 
-    createRun(workspaceId: string, agentId: string, prompt: string, model: ModelTier): Run {
+    createRun(
+      workspaceId: string,
+      agentId: string,
+      prompt: string,
+      model: ModelTier,
+      resumed = false,
+    ): Run {
       const row: Run = {
         id: ulid(),
         agentId,
@@ -114,20 +126,43 @@ export function createStore(db: Db, now: () => number = Date.now) {
         endedAt: null,
       }
       db.insert(runs)
-        .values({ ...row, workspaceId })
+        .values({ ...row, workspaceId, resumed })
         .run()
       return row
     },
 
-    setRunStatus(runId: string, status: AgentStatus, ended: boolean): void {
+    setRunStatus(workspaceId: string, runId: string, status: AgentStatus, ended: boolean): void {
       db.update(runs)
         .set(ended ? { status, endedAt: now() } : { status })
-        .where(eq(runs.id, runId))
+        .where(and(eq(runs.workspaceId, workspaceId), eq(runs.id, runId)))
         .run()
     },
 
-    setRunTotals(runId: string, totals: RunTotals): void {
-      db.update(runs).set(totals).where(eq(runs.id, runId)).run()
+    setRunTotals(workspaceId: string, runId: string, totals: RunTotals): void {
+      db.update(runs)
+        .set(totals)
+        .where(and(eq(runs.workspaceId, workspaceId), eq(runs.id, runId)))
+        .run()
+    },
+
+    /**
+     * `costUsd` (en orden cronológico) de las ejecuciones de la sesión actual del agente:
+     * desde su último inicio no reanudado (incluido) hasta la más reciente. `null` si la
+     * ejecución no llegó a reportar costo.
+     */
+    sessionRunCosts(workspaceId: string, agentId: string): Array<number | null> {
+      const rows = db
+        .select({ costUsd: runs.costUsd, resumed: runs.resumed })
+        .from(runs)
+        .where(and(eq(runs.workspaceId, workspaceId), eq(runs.agentId, agentId)))
+        .orderBy(desc(runs.startedAt), desc(runs.id))
+        .all()
+      const costs: Array<number | null> = []
+      for (const row of rows) {
+        costs.push(row.costUsd)
+        if (!row.resumed) break
+      }
+      return costs.reverse()
     },
 
     lastRun(workspaceId: string, agentId: string): Run | undefined {
@@ -139,7 +174,7 @@ export function createStore(db: Db, now: () => number = Date.now) {
         .limit(1)
         .get()
       if (!row) return undefined
-      const { workspaceId: _ws, ...run } = row
+      const { workspaceId: _ws, resumed: _resumed, ...run } = row
       return run
     },
 

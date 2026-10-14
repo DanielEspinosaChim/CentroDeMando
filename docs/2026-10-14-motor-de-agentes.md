@@ -32,12 +32,23 @@
 - Repo git inicializado (rama `main`) y CI en `.github/workflows/ci.yml`.
 - 85 tests en verde.
 
+### Tercera parte (mismo día, con subagentes)
+
+- Flujo: coordinador (plan) → planeador (tasks.md) → 2 implementadores en paralelo → 2 QA en paralelo → auditor.
+- Rate limit propio en memoria (`security/rate-limit.ts`, ventana deslizante de 60 s):
+  escrituras 60/min por workspace (`CDM_RATE_LIMIT_WRITES_PER_MIN`), acciones por agente
+  10/min (`CDM_RATE_LIMIT_AGENT_ACTIONS_PER_MIN`); 429 `RATE_LIMITED` + `Retry-After`.
+- ACL del token en Windows: `whoami`/`icacls` por ruta absoluta de System32 vía `execFile`,
+  por SID; el archivo se crea vacío, se protege y luego se escribe. Verificado con icacls real.
+- 136 tests en verde (1 omitido: chmod POSIX en Windows).
+- Re-auditoría: APROBADO CON OBSERVACIONES, sin P0/P1; dejó 7 P2 nuevos (ver tasks.md).
+- Repo publicado en https://github.com/DanielEspinosaChim/CentroDeMando
+
 ## Qué quedó pendiente
 
-- P2 de la auditoría sin resolver: rate limit en rutas de escritura (`POST /agents`,
-  `POST /projects`, start/stop en bucle); ACL explícita del token en Windows si
-  `CDM_DATA_DIR` apunta fuera del perfil.
-- Crear el repo en GitHub y hacer push (el CI corre recién entonces).
+- Los 7 P2 de la re-auditoría (lista en tasks.md). Los más importantes: que **detener**
+  no quede bloqueado por el rate limit, y rechazar rutas UNC al registrar proyectos.
+- Revisar que el CI de GitHub Actions pase en el primer push.
 - Biome deja avisos de `any` en los tests.
 
 ## Decisiones tomadas
