@@ -9,7 +9,7 @@ import {
   type SDKMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentRole } from '@cdm/shared'
-import { isInside } from '../projects/paths.ts'
+import { isInside, isUncPath } from '../projects/paths.ts'
 import {
   type AgentRunner,
   type RunHandle,
@@ -84,7 +84,13 @@ export function decideTool(cwd: string, toolName: string, input: unknown): ToolD
   for (const key of PATH_INPUT_KEYS) {
     const value = record[key]
     if (typeof value !== 'string') continue
-    if (!isInside(cwd, realPathOfExisting(path.resolve(cwd, value)))) {
+    const resolved = path.resolve(cwd, value)
+    // Por texto y ANTES de tocar el disco: resolver una ruta UNC (servidor de red) con
+    // realpath hace que Windows se conecte a ese servidor y filtre el hash NTLM del usuario.
+    if (isUncPath(value) || isUncPath(resolved)) {
+      return { allow: false, reason: 'Ruta de red (UNC) no permitida' }
+    }
+    if (!isInside(cwd, realPathOfExisting(resolved))) {
       return { allow: false, reason: 'Ruta fuera del proyecto' }
     }
   }
