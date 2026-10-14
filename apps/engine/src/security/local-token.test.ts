@@ -304,7 +304,9 @@ describe('getOrCreateLocalToken (ACL real en Windows)', () => {
   it.runIf(IS_WIN)('archivo preexistente con ACL heredada queda endurecido', () => {
     const file = path.join(dir, TOKEN_FILE_NAME)
     fs.writeFileSync(file, 'contenido previo corrupto')
-    expect(aclEntries(file).some((e) => e.includes('(I)'))).toBe(true)
+    // Según la máquina, el archivo nace con entradas heredadas (I) o explícitas (runners de
+    // GitHub): en ambos casos tiene más de una entrada antes de endurecerlo.
+    expect(aclEntries(file).length).toBeGreaterThan(1)
 
     const warnings: string[] = []
     const token = getOrCreateLocalToken(dir, { onWarning: (m) => warnings.push(m) })
