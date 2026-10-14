@@ -58,6 +58,8 @@
 - Auditoría de verificación: APROBADO CON OBSERVACIONES, sin P0/P1; los 7 P2 cerrados.
 - Código publicado en https://github.com/DanielEspinosaChim/CentroDeMando (rama `main`).
 
+- CI de GitHub Actions en verde (windows-latest). Destapó que los runners crean archivos con entradas ACL explícitas de SYSTEM/Administradores; ahora también se quitan.
+
 ## Qué quedó pendiente
 
 - P2 N1: el tope de costo al reanudar no cuenta ejecuciones cerradas sin `result` (costo nulo).
@@ -65,7 +67,6 @@
   apunta a una no dedicada.
 - Nota: tras `stop` sobre una ejecución que drena, el run queda en `paused` en el historial
   (solo consistencia).
-- Revisar que el CI de GitHub Actions pase en verde.
 - Biome deja avisos de `any` en los tests.
 - Siguiente feature: 002 (bus de mensajes).
 
