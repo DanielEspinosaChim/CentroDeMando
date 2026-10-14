@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  BROAD_SIDS,
   getOrCreateLocalToken,
   restrictDataDir,
   TOKEN_FILE_NAME,
@@ -68,9 +69,7 @@ describe('getOrCreateLocalToken (Windows, exec inyectado)', () => {
       '/grant:r',
       `*${FAKE_SID}:F`,
       '/remove:g',
-      '*S-1-1-0',
-      '*S-1-5-11',
-      '*S-1-5-32-545',
+      ...BROAD_SIDS,
     ])
   })
 
@@ -328,6 +327,22 @@ describe('getOrCreateLocalToken (ACL real en Windows)', () => {
     expect(entries).toHaveLength(1)
   })
 
+  it.runIf(IS_WIN)(
+    'quita entradas EXPLÍCITAS de SYSTEM y Administradores (caso runner de CI)',
+    () => {
+      const file = path.join(dir, TOKEN_FILE_NAME)
+      fs.writeFileSync(file, 'B'.repeat(43))
+      execFileSync(icacls, [file, '/grant', '*S-1-5-18:F', '*S-1-5-32-544:F', '*S-1-3-0:F'], {
+        windowsHide: true,
+      })
+      expect(aclEntries(file).length).toBeGreaterThan(1)
+      getOrCreateLocalToken(dir)
+      const entries = aclEntries(file)
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toContain(os.userInfo().username)
+    },
+  )
+
   it.runIf(IS_WIN)('el propietario sigue pudiendo leer el token tras la ACL e idempotencia', () => {
     const a = getOrCreateLocalToken(dir)
     const b = getOrCreateLocalToken(dir)
@@ -359,9 +374,7 @@ describe('restrictDataDir (Windows, exec inyectado)', () => {
       '/grant:r',
       `*${FAKE_SID}:(OI)(CI)F`,
       '/remove:g',
-      '*S-1-1-0',
-      '*S-1-5-11',
-      '*S-1-5-32-545',
+      ...BROAD_SIDS,
     ])
     // Sin shell: cada argumento es un elemento propio, nada de una línea de comandos.
     expect(acl?.args.every((a) => !/[&|;<>]/.test(a))).toBe(true)

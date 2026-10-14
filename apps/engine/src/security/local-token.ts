@@ -7,8 +7,23 @@ export const TOKEN_FILE_NAME = 'local-token'
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/
 const SID_PATTERN = /S-1-\d+(?:-\d+)+/
 
-/** SIDs de grupos amplios que se quitan explícitamente: Todos, Usuarios autenticados y Usuarios. */
-const BROAD_SIDS = ['*S-1-1-0', '*S-1-5-11', '*S-1-5-32-545']
+/**
+ * SIDs cuyas entradas EXPLÍCITAS se quitan: `/inheritance:r` solo elimina las heredadas, y
+ * en algunas máquinas (p. ej. los runners de GitHub) un archivo nuevo nace con entradas
+ * explícitas de SYSTEM y Administradores tomadas de la DACL por defecto del proceso.
+ * Todos, Usuarios autenticados, Usuarios, SYSTEM, Administradores, Usuarios avanzados,
+ * CREATOR OWNER y CREATOR GROUP.
+ */
+export const BROAD_SIDS = [
+  '*S-1-1-0',
+  '*S-1-5-11',
+  '*S-1-5-32-545',
+  '*S-1-5-18',
+  '*S-1-5-32-544',
+  '*S-1-5-32-547',
+  '*S-1-3-0',
+  '*S-1-3-1',
+]
 
 /**
  * Ejecuta un binario con argumentos en arreglo (sin shell) y devuelve su stdout.
