@@ -6,7 +6,50 @@ allowBuilds:
   esbuild: true
 
 # Endurecimiento de la cadena de suministro (reglas de Semgrep).
-# minimumReleaseAge en minutos: 1 día por ahora; subir a 10080 (7 días) cuando el lockfile madure.
 blockExoticSubdeps: true
-minimumReleaseAge: 1440
+minimumReleaseAge: 10080
+# Versiones del lockfile publicadas hace menos de 7 días al adoptar la política (2026-10-14).
+# Cualquier dependencia NUEVA sí debe cumplir los 7 días. Quitar entradas al actualizar el lockfile.
+minimumReleaseAgeExclude:
+  - "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.296"
+  - "@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.296"
+  - "@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.296"
+  - "@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.296"
+  - "@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.296"
+  - "@anthropic-ai/claude-agent-sdk-linux-x64@0.3.296"
+  - "@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.296"
+  - "@anthropic-ai/claude-agent-sdk-win32-x64@0.3.296"
+  - "@anthropic-ai/claude-agent-sdk@0.3.296"
+  - "@anthropic-ai/sdk@0.133.0"
+  - "@fastify/ajv-compiler@4.0.7"
+  - "@fastify/error@4.2.1"
+  - "@fastify/fast-json-stringify-compiler@5.1.1"
+  - "@fastify/forwarded@3.1.1"
+  - "@fastify/merge-json-schemas@0.2.2"
+  - "@fastify/proxy-addr@5.1.2"
+  - "@fastify/websocket@11.3.4"
+  - "@hono/node-server@2.1.5"
+  - "@types/node@26.6.5"
+  - "@vitest/mocker@5.0.4"
+  - "@vitest/spy@5.0.4"
+  - "avvio@9.3.1"
+  - "drizzle-orm@0.45.4"
+  - "express@5.3.0"
+  - "fast-json-stringify@7.1.0"
+  - "fast-uri@4.2.2"
+  - "fastify-plugin@6.0.1"
+  - "fastify@5.12.7"
+  - "find-my-way@9.10.0"
+  - "ip-address@10.7.4"
+  - "json-schema-ref-resolver@3.0.1"
+  - "light-my-request@6.8.0"
+  - "postcss@8.5.30"
+  - "process-warning@5.1.1"
+  - "safe-regex2@5.1.2"
+  - "secure-json-parse@4.1.1"
+  - "set-cookie-parser@3.1.3"
+  - "tinybench@6.2.2"
+  - "vite@8.3.4"
+  - "vitest@5.0.4"
+  - "zod@4.6.7"
 trustPolicy: no-downgrade
