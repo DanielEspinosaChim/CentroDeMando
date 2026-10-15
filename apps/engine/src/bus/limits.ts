@@ -4,6 +4,9 @@ import { RateLimiter } from '../security/rate-limit.ts'
 export const MAX_MESSAGES_PER_MINUTE = 20
 /** Despertares automáticos encadenados permitidos por hilo (criterio C002-7, punto D). */
 export const MAX_WAKE_DEPTH = 10
+/** Tope de una entrega (prompt de la tarea o `read_inbox`): el resto queda pendiente. */
+export const MAX_DELIVERY_MESSAGES = 50
+export const MAX_DELIVERY_CHARS = 64_000
 
 export interface BusLimitsOptions {
   messagesPerMinute?: number
@@ -41,9 +44,15 @@ export class BusLimits {
     })
   }
 
-  /** Consume un envío del cupo del agente; `false` si ya alcanzó el límite del minuto. */
-  tryConsume(workspaceId: string, agentId: string): boolean {
-    return this.limiter.hit(`${workspaceId}:${agentId}`).allowed
+  /**
+   * Consume `cost` envíos del cupo del agente (uno por destinatario); `false` si ya alcanzó el
+   * límite del minuto. Una difusión a N agentes cuesta N, no 1.
+   */
+  tryConsume(workspaceId: string, agentId: string, cost = 1): boolean {
+    for (let i = 0; i < cost; i++) {
+      if (!this.limiter.hit(`${workspaceId}:${agentId}`).allowed) return false
+    }
+    return true
   }
 
   /** Un mensaje con esta profundidad todavía puede despertar a su destinatario. */

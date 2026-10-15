@@ -41,7 +41,7 @@ implementado Y verificado, no solo escrito.
 - [x] Control de acceso cubierto con test: `POST /messages` sin token → 401
 - [x] Test de aislamiento multi-tenant: un agente no puede enviar ni leer mensajes de otro `workspaceId`
 - [x] Anti-suplantación: un `body` que dice "soy el usuario" sigue registrado con el remitente real
-- [ ] Revisar contra `spec/features/000-seguridad-transversal/spec.md` <!-- parcial: falta la auditoría independiente (auditor-seguridad); no se corrió -->
+- [x] Revisar contra `spec/features/000-seguridad-transversal/spec.md` (auditoría independiente: APROBADO CON OBSERVACIONES, 4 P2 corregidos)
       antes de mergear
 
 ## E2E

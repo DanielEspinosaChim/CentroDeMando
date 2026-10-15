@@ -565,13 +565,16 @@ export class AgentManager {
     const bus = this.deps.bus
     const delivery = bus?.deliverPending(workspaceId, agent.id)
     const fullPrompt = delivery
-      ? prependMessages(prompt, delivery.messages, delivery.senders)
+      ? prependMessages(prompt, delivery.messages, delivery.senders, delivery.remaining)
       : prompt
     const thread = { current: delivery?.context ?? null }
     const busTools = bus
       ? createBusTools(bus, workspaceId, agent.id, () => ({
           runId: run.id,
           context: thread.current,
+          raise: (c) => {
+            if (!thread.current || c.depth > thread.current.depth) thread.current = c
+          },
         }))
       : undefined
 

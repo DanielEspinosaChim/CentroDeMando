@@ -12,7 +12,13 @@ import type { NewMessage, Store } from '../db/store.ts'
 import { LimitError, NotFoundError, parseInput, ValidationError } from '../errors/index.ts'
 import type { EventHub } from '../events/hub.ts'
 import type { SenderInfo } from './delivery.ts'
-import { BusLimits, nextDepth, type ThreadContext } from './limits.ts'
+import {
+  BusLimits,
+  MAX_DELIVERY_CHARS,
+  MAX_DELIVERY_MESSAGES,
+  nextDepth,
+  type ThreadContext,
+} from './limits.ts'
 
 /**
  * Remitente de un envío. Lo fija el motor (el servidor MCP del agente o la ruta HTTP),
@@ -43,6 +49,8 @@ export interface Delivery {
   senders: Map<string, SenderInfo>
   /** Contexto de hilo que hereda la ejecución que recibe estos mensajes. */
   context: ThreadContext | null
+  /** Mensajes que quedaron sin entregar por el tope de la entrega (siguen pendientes). */
+  remaining: number
 }
 
 export interface AgentSummary {
@@ -52,6 +60,14 @@ export interface AgentSummary {
   status: Agent['status']
   /** Es el agente que pregunta. */
   self: boolean
+}
+
+const DELIVERY_CAP = { messages: MAX_DELIVERY_MESSAGES, chars: MAX_DELIVERY_CHARS }
+
+function deepestContext(messages: readonly Message[]): ThreadContext {
+  let deepest = messages[0] as Message
+  for (const m of messages) if (m.depth >= deepest.depth) deepest = m
+  return { threadId: deepest.threadId, depth: deepest.depth }
 }
 
 /** Ids monótonos: dentro del mismo milisegundo el orden por id es el orden de envío. */
@@ -96,6 +112,15 @@ export class MessageBus {
     }
 
     const recipients = this.resolveRecipients(workspaceId, sender, input.to)
+    // Una difusión cuesta una unidad de cupo por destinatario (la primera ya se consumió).
+    if (
+      sender.kind === 'agent' &&
+      recipients.length > 1 &&
+      !this.limits.tryConsume(workspaceId, sender.agentId, recipients.length - 1)
+    ) {
+      this.emitLimit(workspaceId, sender, 'rate_limit', null, RATE_LIMIT_MESSAGE)
+      throw new LimitError(RATE_LIMIT_MESSAGE)
+    }
     const parent = input.replyToId
       ? this.requireParent(workspaceId, sender, input.replyToId)
       : undefined
@@ -148,21 +173,27 @@ export class MessageBus {
 
   /** Toma los pendientes del agente para anteponerlos al prompt; pasan a `delivered`. */
   deliverPending(workspaceId: string, agentId: string): Delivery {
-    const messages = this.deps.store.takePendingMessages(workspaceId, agentId)
-    if (messages.length === 0) return { messages, senders: new Map(), context: null }
-    let deepest = messages[0] as Message
-    for (const m of messages) if (m.depth >= deepest.depth) deepest = m
+    const messages = this.deps.store.takePendingMessages(workspaceId, agentId, DELIVERY_CAP)
+    if (messages.length === 0) return { messages, senders: new Map(), context: null, remaining: 0 }
     return {
       messages,
       senders: this.senderInfo(workspaceId),
-      context: { threadId: deepest.threadId, depth: deepest.depth },
+      context: deepestContext(messages),
+      remaining: this.deps.store.countUnread(workspaceId, agentId, ['pending']),
     }
   }
 
   /** `read_inbox`: solo mensajes dirigidos al agente que llama; pasan a `read`. */
   readInbox(workspaceId: string, agentId: string): Delivery {
-    const messages = this.deps.store.readInbox(workspaceId, agentId)
-    return { messages, senders: this.senderInfo(workspaceId), context: null }
+    const messages = this.deps.store.readInbox(workspaceId, agentId, DELIVERY_CAP)
+    // El contexto es el hilo más profundo de lo leído: quien llama lo hereda, así leer la
+    // bandeja no sirve para reiniciar el límite de despertares encadenados.
+    return {
+      messages,
+      senders: this.senderInfo(workspaceId),
+      context: messages.length ? deepestContext(messages) : null,
+      remaining: this.deps.store.countUnread(workspaceId, agentId),
+    }
   }
 
   /** `list_agents`: nombre, rol y estado de los agentes del workspace. */

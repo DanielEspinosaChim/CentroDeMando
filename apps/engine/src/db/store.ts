@@ -98,6 +98,25 @@ export type NewMessage = Omit<Message, 'status' | 'deliveredAt' | 'createdAt'>
 
 const UNREAD: MessageStatus[] = ['pending', 'delivered']
 
+/** Tope de una entrega de mensajes: cuántos y cuántos caracteres de cuerpo como máximo. */
+export interface DeliveryCap {
+  messages: number
+  chars: number
+}
+
+/** Recorta por caracteres acumulados (siempre deja al menos un mensaje). */
+function capRows<T extends { body: string }>(rows: T[], maxChars: number | undefined): T[] {
+  if (maxChars === undefined) return rows
+  let total = 0
+  const out: T[] = []
+  for (const r of rows) {
+    total += r.body.length
+    if (out.length > 0 && total > maxChars) break
+    out.push(r)
+  }
+  return out
+}
+
 /**
  * Acceso a datos. Toda lectura/escritura de proyectos y agentes filtra por
  * `workspaceId` (checklist de seguridad, punto 3). Solo consultas Drizzle parametrizadas.
@@ -369,20 +388,41 @@ export function createStore(db: Db, now: () => number = Date.now) {
       return row ? toMessage(row) : undefined
     },
 
+    /** Cuántos mensajes sin leer (pendientes o entregados) tiene el agente. */
+    countUnread(workspaceId: string, agentId: string, statuses: MessageStatus[] = UNREAD): number {
+      return (
+        db
+          .select({ n: sql<number>`count(*)` })
+          .from(messages)
+          .where(
+            and(
+              eq(messages.workspaceId, workspaceId),
+              eq(messages.toAgentId, agentId),
+              inArray(messages.status, statuses),
+            ),
+          )
+          .get()?.n ?? 0
+      )
+    },
+
     /** Pendientes del agente (más antiguo primero) que pasan a `delivered`. */
-    takePendingMessages(workspaceId: string, agentId: string): Message[] {
+    takePendingMessages(workspaceId: string, agentId: string, cap?: DeliveryCap): Message[] {
       return db.transaction((tx) => {
         const where = and(
           eq(messages.workspaceId, workspaceId),
           eq(messages.toAgentId, agentId),
           eq(messages.status, 'pending'),
         )
-        const rows = tx
-          .select()
-          .from(messages)
-          .where(where)
-          .orderBy(asc(messages.createdAt), asc(messages.id))
-          .all()
+        const rows = capRows(
+          tx
+            .select()
+            .from(messages)
+            .where(where)
+            .orderBy(asc(messages.createdAt), asc(messages.id))
+            .limit(cap?.messages ?? -1)
+            .all(),
+          cap?.chars,
+        )
         if (rows.length === 0) return []
         const t = now()
         tx.update(messages)
@@ -402,19 +442,23 @@ export function createStore(db: Db, now: () => number = Date.now) {
     },
 
     /** No leídos (pendientes o entregados) dirigidos al agente; pasan a `read`. */
-    readInbox(workspaceId: string, agentId: string): Message[] {
+    readInbox(workspaceId: string, agentId: string, cap?: DeliveryCap): Message[] {
       return db.transaction((tx) => {
         const where = and(
           eq(messages.workspaceId, workspaceId),
           eq(messages.toAgentId, agentId),
           inArray(messages.status, UNREAD),
         )
-        const rows = tx
-          .select()
-          .from(messages)
-          .where(where)
-          .orderBy(asc(messages.createdAt), asc(messages.id))
-          .all()
+        const rows = capRows(
+          tx
+            .select()
+            .from(messages)
+            .where(where)
+            .orderBy(asc(messages.createdAt), asc(messages.id))
+            .limit(cap?.messages ?? -1)
+            .all(),
+          cap?.chars,
+        )
         if (rows.length === 0) return []
         const t = now()
         tx.update(messages)

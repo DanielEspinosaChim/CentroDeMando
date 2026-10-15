@@ -21,7 +21,7 @@ Criterios: 32 · cubiertos: 32 · sin test en features activas: 0
 | C002-1 | 002-bus-de-mensajes | cubierto | apps\engine\src\agents\manager-bus.test.ts, apps\engine\src\bus\bus.test.ts, apps\engine\src\bus\tools.test.ts |
 | C002-2 | 002-bus-de-mensajes | cubierto | apps\engine\src\agents\manager-bus.test.ts, apps\engine\src\bus\bus.test.ts, apps\engine\test\bus-http.test.ts |
 | C002-3 | 002-bus-de-mensajes | cubierto | apps\engine\src\agents\manager-bus.test.ts, apps\engine\src\bus\bus.test.ts, apps\engine\src\bus\tools.test.ts, apps\engine\test\bus-http.test.ts |
-| C002-4 | 002-bus-de-mensajes | cubierto | apps\engine\src\agents\manager-bus.test.ts, apps\engine\src\bus\delivery.test.ts |
+| C002-4 | 002-bus-de-mensajes | cubierto | apps\engine\src\agents\manager-bus.test.ts, apps\engine\src\bus\bus.test.ts, apps\engine\src\bus\delivery.test.ts |
 | C002-5 | 002-bus-de-mensajes | cubierto | apps\engine\src\agents\manager-bus.test.ts, apps\engine\test\bus-http.test.ts |
 | C002-6 | 002-bus-de-mensajes | cubierto | apps\engine\src\bus\bus.test.ts, apps\engine\src\bus\limits.test.ts |
 | C002-7 | 002-bus-de-mensajes | cubierto | apps\engine\src\agents\manager-bus.test.ts, apps\engine\src\bus\bus.test.ts, apps\engine\src\bus\limits.test.ts |

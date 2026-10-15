@@ -36,6 +36,8 @@ export interface BusTools {
 export interface BusRunState {
   runId: string | null
   context: ThreadContext | null
+  /** Sube el contexto de hilo de la ejecución (nunca lo baja). */
+  raise?: (context: ThreadContext) => void
 }
 
 const INTERNAL_ERROR = 'Error interno del bus de mensajes'
@@ -64,10 +66,11 @@ export function createBusTools(
           case 'read_inbox': {
             parseInput(EmptyToolInput, input ?? {})
             const inbox = bus.readInbox(workspaceId, agentId)
+            if (inbox.context) state().raise?.(inbox.context)
             return {
               ok: true,
               text: inbox.messages.length
-                ? formatMessagesBlock(inbox.messages, inbox.senders)
+                ? formatMessagesBlock(inbox.messages, inbox.senders, inbox.remaining)
                 : 'No tienes mensajes sin leer.',
             }
           }

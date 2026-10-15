@@ -6,6 +6,7 @@ import { LimitError, NotFoundError, ValidationError } from '../errors/index.ts'
 import { EventHub } from '../events/hub.ts'
 import { MAX_DEPTH_MESSAGE, MessageBus, type Sender } from './bus.ts'
 import { BusLimits } from './limits.ts'
+import { createBusTools } from './tools.ts'
 
 describe('MessageBus', () => {
   let h: DbHandle
@@ -259,5 +260,60 @@ describe('MessageBus', () => {
     expect(list.map((x) => x.name)).toEqual(['Ana', 'Beto', 'Caro'])
     expect(list.find((x) => x.self)?.id).toBe(a)
     expect(list.some((x) => x.id === foreign)).toBe(false)
+  })
+
+  it('C002-6 una difusión cuenta un envío por destinatario en el límite por minuto', () => {
+    const limited = new MessageBus({
+      store,
+      hub: new EventHub(),
+      limits: new BusLimits({ messagesPerMinute: 5, now: () => t }),
+    })
+    // Cada difusión llega a 2 agentes (Beto y Caro): cuesta 2 del cupo de 5.
+    limited.send('local', from(a), { to: '*', body: 'uno' })
+    limited.send('local', from(a), { to: '*', body: 'dos' })
+    expect(() => limited.send('local', from(a), { to: '*', body: 'tres' })).toThrow(LimitError)
+    expect(count()).toBe(4)
+  })
+
+  it('C002-4 la entrega se topa en 50 mensajes y el resto sigue pendiente', () => {
+    for (let i = 0; i < 60; i++) bus.send('local', { kind: 'user' }, { to: b, body: `m${i}` })
+    const first = bus.deliverPending('local', b)
+    expect(first.messages).toHaveLength(50)
+    expect(first.remaining).toBe(10)
+    expect(bus.deliverPending('local', b).messages).toHaveLength(10)
+  })
+
+  it('C002-4 la entrega se topa por caracteres pero siempre entrega al menos un mensaje', () => {
+    for (let i = 0; i < 3; i++) {
+      bus.send('local', { kind: 'user' }, { to: b, body: 'x'.repeat(7_000) })
+    }
+    expect(bus.deliverPending('local', b).messages).toHaveLength(3)
+    for (let i = 0; i < 3; i++) {
+      bus.send('local', { kind: 'user' }, { to: c, body: 'y'.repeat(8_000) })
+    }
+    const inbox = bus.readInbox('local', c)
+    expect(inbox.messages.length).toBeGreaterThanOrEqual(1)
+    expect(inbox.messages.reduce((n, m) => n + m.body.length, 0)).toBeLessThanOrEqual(64_000)
+  })
+
+  it('C002-7 read_inbox no reinicia la profundidad: lo leído sube el contexto de quien lo lee', () => {
+    // A responde con wake desde un hilo ya profundo (depth 10): el mensaje a B queda en 11.
+    const deep = { threadId: '01JABCDEFGHJKMNPQRSTVWXYZ9', depth: 10 }
+    bus.send('local', from(a, { context: deep }), { to: b, body: 'profundo', wake: true })
+    let context: { threadId: string; depth: number } | null = null
+    const tools = createBusTools(bus, 'local', b, () => ({
+      runId: null,
+      context,
+      raise: (c) => {
+        if (!context || c.depth > context.depth) context = c
+      },
+    }))
+    expect(tools.call('read_inbox', {}).ok).toBe(true)
+    expect(context).toMatchObject({ depth: 11 })
+    // B reenvía con wake sin replyToId: hereda 11 + 1, así que no despierta a nadie.
+    woken.length = 0
+    expect(tools.call('send_message', { to: 'Caro', body: 'eco', wake: true }).ok).toBe(true)
+    expect(woken).toEqual([])
+    expect(busEvents('bus.limit').at(-1)).toMatchObject({ reason: 'max_depth' })
   })
 })
