@@ -1,6 +1,8 @@
 import type {
   AgentRole,
   AgentStatus,
+  MessageFromKind,
+  MessageStatus,
   ModelTier,
   RiskLevel,
   RoutingSource,
@@ -93,6 +95,41 @@ export const runs = sqliteTable(
   (t) => [index('runs_agent_idx').on(t.agentId), index('runs_workspace_idx').on(t.workspaceId)],
 )
 
+/**
+ * Bus de mensajes (feature 002, migración 7). Una fila por destinatario: una difusión a `*`
+ * crea N-1 filas con el mismo `threadId`. El remitente lo fija el motor, nunca el agente.
+ */
+export const messages = sqliteTable(
+  'messages',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull(),
+    /** Id del primer mensaje del hilo. */
+    threadId: text('thread_id').notNull(),
+    fromKind: text('from_kind').$type<MessageFromKind>().notNull(),
+    /** NULL si lo escribió el usuario (o si el agente remitente se borró). */
+    fromAgentId: text('from_agent_id').references(() => agents.id, { onDelete: 'set null' }),
+    toAgentId: text('to_agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    body: text('body').notNull(),
+    replyToId: text('reply_to_id').references((): AnySQLiteColumn => messages.id, {
+      onDelete: 'set null',
+    }),
+    wake: integer('wake', { mode: 'boolean' }).notNull().default(false),
+    depth: integer('depth').notNull().default(0),
+    status: text('status').$type<MessageStatus>().notNull(),
+    createdAt: integer('created_at').notNull(),
+    deliveredAt: integer('delivered_at'),
+  },
+  (t) => [
+    index('messages_workspace_idx').on(t.workspaceId),
+    index('messages_to_status_idx').on(t.toAgentId, t.status),
+    index('messages_from_idx').on(t.fromAgentId),
+  ],
+)
+
 export type ProjectRow = typeof projects.$inferSelect
 export type AgentRow = typeof agents.$inferSelect
 export type RunRow = typeof runs.$inferSelect
+export type MessageRow = typeof messages.$inferSelect

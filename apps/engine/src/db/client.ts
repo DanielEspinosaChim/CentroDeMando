@@ -85,6 +85,27 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE runs ADD COLUMN end_reason TEXT;
   `,
+  // 7: bus de mensajes entre agentes (feature 002). Una fila por destinatario.
+  `
+  CREATE TABLE messages (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    from_kind TEXT NOT NULL,
+    from_agent_id TEXT REFERENCES agents (id) ON DELETE SET NULL,
+    to_agent_id TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+    body TEXT NOT NULL,
+    reply_to_id TEXT REFERENCES messages (id) ON DELETE SET NULL,
+    wake INTEGER NOT NULL DEFAULT 0,
+    depth INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    delivered_at INTEGER
+  );
+  CREATE INDEX messages_workspace_idx ON messages (workspace_id);
+  CREATE INDEX messages_to_status_idx ON messages (to_agent_id, status);
+  CREATE INDEX messages_from_idx ON messages (from_agent_id);
+  `,
 ]
 
 function migrate(sqlite: Database.Database): void {

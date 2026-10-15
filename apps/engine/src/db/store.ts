@@ -1,6 +1,8 @@
 import type {
   Agent,
   AgentStatus,
+  Message,
+  MessageStatus,
   ModelTier,
   Project,
   RiskLevel,
@@ -8,11 +10,19 @@ import type {
   Run,
   TaskSize,
 } from '@cdm/shared'
-import { and, asc, desc, eq, inArray } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, inArray, lt, lte, or, sql } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { StatsRunRow } from '../router/stats.ts'
 import type { Db } from './client.ts'
-import { agents, projects, type RunEndReason, type RunRow, runs } from './schema.ts'
+import {
+  agents,
+  type MessageRow,
+  messages,
+  projects,
+  type RunEndReason,
+  type RunRow,
+  runs,
+} from './schema.ts'
 
 const LIVE_STATUSES: AgentStatus[] = ['thinking', 'running_tool']
 
@@ -76,6 +86,17 @@ function toRun(row: RunRow): Run {
   } = row
   return { ...run, routingReasons: parseReasons(routingReasons) }
 }
+
+/** Fila → `Message` de la API (sin `workspaceId`). */
+function toMessage(row: MessageRow): Message {
+  const { workspaceId: _ws, ...message } = row
+  return message
+}
+
+/** Mensaje a guardar: el motor ya resolvió remitente, destinatario, hilo y profundidad. */
+export type NewMessage = Omit<Message, 'status' | 'deliveredAt' | 'createdAt'>
+
+const UNREAD: MessageStatus[] = ['pending', 'delivered']
 
 /**
  * Acceso a datos. Toda lectura/escritura de proyectos y agentes filtra por
@@ -317,6 +338,161 @@ export function createStore(db: Db, now: () => number = Date.now) {
         .where(eq(runs.workspaceId, workspaceId))
         .orderBy(asc(runs.agentId), asc(runs.startedAt), asc(runs.id))
         .all()
+    },
+
+    // --- Bus de mensajes (feature 002) ------------------------------------------
+
+    /** Guarda todas las entregas de un envío en una sola transacción (todo o nada). */
+    insertMessages(workspaceId: string, rows: NewMessage[]): Message[] {
+      const t = now()
+      const full = rows.map((r) => ({
+        ...r,
+        status: 'pending' as const,
+        createdAt: t,
+        deliveredAt: null,
+      }))
+      db.transaction((tx) => {
+        for (const row of full)
+          tx.insert(messages)
+            .values({ ...row, workspaceId })
+            .run()
+      })
+      return full
+    },
+
+    getMessage(workspaceId: string, id: string): Message | undefined {
+      const row = db
+        .select()
+        .from(messages)
+        .where(and(eq(messages.workspaceId, workspaceId), eq(messages.id, id)))
+        .get()
+      return row ? toMessage(row) : undefined
+    },
+
+    /** Pendientes del agente (más antiguo primero) que pasan a `delivered`. */
+    takePendingMessages(workspaceId: string, agentId: string): Message[] {
+      return db.transaction((tx) => {
+        const where = and(
+          eq(messages.workspaceId, workspaceId),
+          eq(messages.toAgentId, agentId),
+          eq(messages.status, 'pending'),
+        )
+        const rows = tx
+          .select()
+          .from(messages)
+          .where(where)
+          .orderBy(asc(messages.createdAt), asc(messages.id))
+          .all()
+        if (rows.length === 0) return []
+        const t = now()
+        tx.update(messages)
+          .set({ status: 'delivered', deliveredAt: t })
+          .where(
+            and(
+              where,
+              inArray(
+                messages.id,
+                rows.map((r) => r.id),
+              ),
+            ),
+          )
+          .run()
+        return rows.map((r) => ({ ...toMessage(r), status: 'delivered' as const, deliveredAt: t }))
+      })
+    },
+
+    /** No leídos (pendientes o entregados) dirigidos al agente; pasan a `read`. */
+    readInbox(workspaceId: string, agentId: string): Message[] {
+      return db.transaction((tx) => {
+        const where = and(
+          eq(messages.workspaceId, workspaceId),
+          eq(messages.toAgentId, agentId),
+          inArray(messages.status, UNREAD),
+        )
+        const rows = tx
+          .select()
+          .from(messages)
+          .where(where)
+          .orderBy(asc(messages.createdAt), asc(messages.id))
+          .all()
+        if (rows.length === 0) return []
+        const t = now()
+        tx.update(messages)
+          .set({ status: 'read', deliveredAt: sql`coalesce(${messages.deliveredAt}, ${t})` })
+          .where(
+            and(
+              where,
+              inArray(
+                messages.id,
+                rows.map((r) => r.id),
+              ),
+            ),
+          )
+          .run()
+        return rows.map((r) => ({
+          ...toMessage(r),
+          status: 'read' as const,
+          deliveredAt: r.deliveredAt ?? t,
+        }))
+      })
+    },
+
+    /**
+     * Historial del agente (enviados y recibidos), del más reciente al más antiguo.
+     * `cursor` es el id del último mensaje de la página anterior; `undefined` si no existe
+     * en el workspace o no es del agente (el llamador responde 400).
+     */
+    messageHistory(
+      workspaceId: string,
+      agentId: string,
+      limit: number,
+      cursor?: string,
+    ): { messages: Message[]; nextCursor: string | null } | undefined {
+      const mine = or(eq(messages.toAgentId, agentId), eq(messages.fromAgentId, agentId))
+      let after: ReturnType<typeof or> | undefined
+      if (cursor) {
+        const c = db
+          .select({ createdAt: messages.createdAt, id: messages.id })
+          .from(messages)
+          .where(and(eq(messages.workspaceId, workspaceId), eq(messages.id, cursor), mine))
+          .get()
+        if (!c) return undefined
+        after = or(
+          lt(messages.createdAt, c.createdAt),
+          and(eq(messages.createdAt, c.createdAt), lt(messages.id, c.id)),
+        )
+      }
+      const rows = db
+        .select()
+        .from(messages)
+        .where(and(eq(messages.workspaceId, workspaceId), mine, after))
+        .orderBy(desc(messages.createdAt), desc(messages.id))
+        .limit(limit + 1)
+        .all()
+      const page = rows.slice(0, limit).map(toMessage)
+      return {
+        messages: page,
+        nextCursor: rows.length > limit ? (page.at(-1)?.id ?? null) : null,
+      }
+    },
+
+    /** Agentes del workspace con mensajes `wake` pendientes que aún pueden despertarlos. */
+    agentsWithPendingWake(workspaceId: string, maxDepth: number): string[] {
+      return db
+        .selectDistinct({ id: messages.toAgentId })
+        .from(messages)
+        .where(
+          and(
+            eq(messages.workspaceId, workspaceId),
+            eq(messages.status, 'pending'),
+            eq(messages.wake, true),
+            gt(messages.depth, 0),
+            lte(messages.depth, maxDepth),
+          ),
+        )
+        .orderBy(asc(messages.toAgentId))
+        .all()
+        .map((r) => r.id)
     },
 
     /** Al arrancar: lo que estaba en curso cuando se cayó el motor queda `interrupted`. */

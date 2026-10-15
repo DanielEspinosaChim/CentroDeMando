@@ -171,7 +171,7 @@ describe('migraciones', () => {
   })
 
   it('una base en la versión 5 sube a la 6 con end_reason en NULL para filas previas', () => {
-    expect(MIGRATIONS.length).toBe(6)
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(6)
     const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cdm-mig-')), 'data.db')
     const v5 = new Database(file)
     for (const m of MIGRATIONS.slice(0, 5)) v5.exec(m)
@@ -187,7 +187,7 @@ describe('migraciones', () => {
     v5.close()
 
     const h = openDb(file)
-    expect(h.sqlite.pragma('user_version', { simple: true })).toBe(6)
+    expect(h.sqlite.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length)
     const store = createStore(h.db)
     const runId = '01JABCDEFGHJKMNPQRSTVWXYZ2'
     expect(store.runEndReason('local', runId)).toBeNull()
@@ -198,6 +198,38 @@ describe('migraciones', () => {
     expect(store.runEndReason('local', runId)).toBe('limit_budget')
     expect(store.runEndReason('otro', runId)).toBeNull()
     expect(store.getRun('local', runId)).not.toHaveProperty('endReason')
+    h.close()
+  })
+
+  it('una base en la versión 6 sube a la 7 con la tabla messages y borrar un agente borra su bandeja', () => {
+    expect(MIGRATIONS.length).toBe(7)
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cdm-mig-')), 'data.db')
+    const v6 = new Database(file)
+    for (const m of MIGRATIONS.slice(0, 6)) v6.exec(m)
+    v6.pragma('user_version = 6')
+    v6.exec(`
+      INSERT INTO projects VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ0', 'local', 'P', 'C:/p', 1);
+      INSERT INTO agents VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ1', 'local', '01JABCDEFGHJKMNPQRSTVWXYZ0',
+        'A', 'qa', 'sonnet', 'done', NULL, 1, 1);
+      INSERT INTO agents VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ2', 'local', '01JABCDEFGHJKMNPQRSTVWXYZ0',
+        'B', 'qa', 'sonnet', 'done', NULL, 1, 1);
+    `)
+    v6.close()
+
+    const h = openDb(file)
+    expect(h.sqlite.pragma('user_version', { simple: true })).toBe(7)
+    h.sqlite.exec(`
+      INSERT INTO messages (id, workspace_id, thread_id, from_kind, from_agent_id, to_agent_id,
+        body, status, created_at)
+        VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ3', 'local', '01JABCDEFGHJKMNPQRSTVWXYZ3', 'agent',
+        '01JABCDEFGHJKMNPQRSTVWXYZ1', '01JABCDEFGHJKMNPQRSTVWXYZ2', 'hola', 'pending', 1);
+    `)
+    const store = createStore(h.db)
+    // Borrar al remitente deja el mensaje sin remitente; borrar al destinatario lo borra.
+    store.deleteAgent('local', '01JABCDEFGHJKMNPQRSTVWXYZ1')
+    expect(store.getMessage('local', '01JABCDEFGHJKMNPQRSTVWXYZ3')?.fromAgentId).toBeNull()
+    store.deleteAgent('local', '01JABCDEFGHJKMNPQRSTVWXYZ2')
+    expect(store.getMessage('local', '01JABCDEFGHJKMNPQRSTVWXYZ3')).toBeUndefined()
     h.close()
   })
 
