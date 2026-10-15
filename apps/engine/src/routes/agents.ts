@@ -1,4 +1,4 @@
-import { CreateAgentInput, Id, ResumeInput, StartTaskInput } from '@cdm/shared'
+import { CreateAgentInput, Id, ResumeInput, RetryInput, StartTaskInput } from '@cdm/shared'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { AgentManager } from '../agents/manager.ts'
@@ -6,12 +6,13 @@ import { parseInput } from '../errors/index.ts'
 import type { RateLimits } from '../security/rate-limit.ts'
 
 const Params = z.object({ id: Id })
+const RunParams = z.object({ id: Id, runId: Id })
 
 export function agentRoutes(app: FastifyInstance, manager: AgentManager, limits: RateLimits): void {
   // El rate limit va en `onRequest` de cada ruta: corre tras las guardas de token/Origin
   // y antes de parsear el cuerpo y validar. Los GET no se limitan.
-  // Solo `tasks` y `resume` comparten el cupo por agente porque son las únicas acciones
-  // que lanzan un proceso del SDK. `pause` y `stop` quedan fuera a propósito: no lanzan
+  // Solo `tasks`, `resume` y `retry` comparten el cupo por agente porque son las únicas
+  // acciones que lanzan un proceso del SDK. `pause` y `stop` quedan fuera a propósito: no lanzan
   // nada y detener un agente que sigue gastando debe estar siempre disponible (un 429
   // ahí dejaría al usuario sin freno hasta 60 s).
   const writes = { onRequest: limits.writes }
@@ -42,6 +43,13 @@ export function agentRoutes(app: FastifyInstance, manager: AgentManager, limits:
     const { id } = parseInput(Params, request.params)
     const input = parseInput(StartTaskInput, request.body)
     const run = manager.startTask(request.workspaceId, id, input)
+    return reply.status(202).send({ runId: run.id })
+  })
+
+  app.post('/agents/:id/tasks/:runId/retry', agentAction, async (request, reply) => {
+    const { id, runId } = parseInput(RunParams, request.params)
+    const input = parseInput(RetryInput, request.body ?? {})
+    const run = manager.retry(request.workspaceId, id, runId, input)
     return reply.status(202).send({ runId: run.id })
   })
 

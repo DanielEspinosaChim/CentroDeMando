@@ -4,17 +4,29 @@ import {
   type CreateAgentInput,
   DEFAULT_MODEL_BY_ROLE,
   type EngineEvent,
+  MODEL_ORDER,
   type ModelTier,
   type ResumeInput,
+  type RetryInput,
+  RISK_FLOOR_MODEL,
   type Run,
   type StartTaskInput,
 } from '@cdm/shared'
 import type { FastifyBaseLogger } from 'fastify'
 import type { EngineConfig } from '../config.ts'
-import type { RunSpend, RunTotals, Store } from '../db/store.ts'
+import {
+  NO_ROUTING,
+  type RunRouting,
+  type RunSpend,
+  type RunTotals,
+  type Store,
+} from '../db/store.ts'
 import { ConflictError, LimitError, NotFoundError, ValidationError } from '../errors/index.ts'
 import type { EventHub } from '../events/hub.ts'
 import { assertCwdInProject, revalidateProjectPath } from '../projects/paths.ts'
+import { classifyPromptRisk } from '../router/classifier.ts'
+import { type RouterConfigSource, staticRouterConfig } from '../router/config-store.ts'
+import { type RouteInput, type RouteResult, route } from '../router/route.ts'
 import {
   type AgentRunner,
   type RunHandle,
@@ -124,6 +136,35 @@ export interface AgentManagerDeps {
   logger: FastifyBaseLogger
   /** Textos a ocultar si aparecen en mensajes que van al log (p. ej. el token local). */
   secrets?: readonly string[]
+  /** Configuración vigente del enrutador (se lee en cada decisión). Por defecto, la de fábrica. */
+  routerConfig?: RouterConfigSource
+}
+
+export const RETRY_NOT_LAST_MESSAGE = 'Solo se puede reintentar la última ejecución del agente'
+export const RETRY_NOT_FAILED_MESSAGE = 'Solo se puede reintentar una ejecución fallida'
+export const RETRY_LIMIT_HIT_MESSAGE =
+  'La ejecución se detuvo por el tope de turnos o de costo, no por un fallo: reintentarla daría otro tope completo. Esperar no libera saldo; inicia una tarea nueva o reanuda la sesión.'
+
+/**
+ * Decisión del enrutador para una ejecución nueva o un reintento. Una reanudación solo la
+ * tiene si su prompt nuevo la sube al piso de riesgo (ver `resumeRiskFloor`).
+ */
+interface Routed {
+  result: RouteResult
+  retryOfRunId: string | null
+  consecutiveFailures: number
+}
+
+interface LaunchOptions {
+  prompt: string
+  model: ModelTier
+  maxBudgetUsd: number
+  /** `sdkSessionId` a continuar (reanudación): no se re-enruta. */
+  resume?: string
+  /** Decisión a guardar y emitir; si falta, solo se guardan `stored`. */
+  routed?: Routed
+  /** Datos de enrutamiento a guardar sin decisión (reanudación). */
+  stored?: RunRouting
 }
 
 export class AgentManager {
@@ -131,11 +172,19 @@ export class AgentManager {
   /** Ejecuciones pausadas/detenidas cuyo proceso aún no terminó: siguen ocupando hueco. */
   private readonly draining = new Map<string, LiveRun>()
   private readonly pending = new Set<Promise<void>>()
+  private readonly routerConfig: RouterConfigSource
 
-  constructor(private readonly deps: AgentManagerDeps) {}
+  constructor(private readonly deps: AgentManagerDeps) {
+    this.routerConfig = deps.routerConfig ?? staticRouterConfig()
+  }
 
   // --- CRUD -----------------------------------------------------------------
 
+  /**
+   * Efecto lateral de la feature 003: `CreateAgentInput.defaultModel` se guarda pero ya no
+   * decide el modelo de las tareas nuevas (sale de `roleDefaults` de la config del
+   * enrutador, ver `startTask`); solo respalda a `resume` cuando no hay ejecución previa.
+   */
   createAgent(workspaceId: string, input: CreateAgentInput): Agent {
     const project = this.deps.store.getProject(workspaceId, input.projectId)
     if (!project) throw new ValidationError('projectId: el proyecto no existe')
@@ -166,16 +215,64 @@ export class AgentManager {
 
   // --- Ciclo de vida ----------------------------------------------------------
 
+  /**
+   * Tarea nueva: el enrutador decide el modelo antes de lanzar (feature 003). Sin `model`
+   * explícito, el modelo por rol sale de la configuración del enrutador (`roleDefaults`),
+   * no de `agent.defaultModel`, para que `PUT /router/config` aplique a todos los agentes.
+   */
   startTask(workspaceId: string, agentId: string, input: StartTaskInput): Run {
     const agent = this.requireAgent(workspaceId, agentId)
     this.assertCanLaunch(agent)
-    return this.launch(
-      workspaceId,
-      agent,
-      input.prompt,
-      input.model ?? agent.defaultModel,
-      this.deps.config.maxCostUsdPerTask,
-    )
+    const result = this.decide({
+      prompt: input.prompt,
+      role: agent.role,
+      consecutiveFailures: 0,
+      ...(input.model ? { requestedModel: input.model } : {}),
+    })
+    return this.launch(workspaceId, agent, {
+      prompt: input.prompt,
+      model: result.decision.model,
+      maxBudgetUsd: this.deps.config.maxCostUsdPerTask,
+      routed: { result, retryOfRunId: null, consecutiveFailures: 0 },
+    })
+  }
+
+  /**
+   * Reintenta la última ejecución del agente si falló (`error`), como tarea nueva: sesión
+   * nueva, prompt original de la tarea y tope de costo completo. Se re-enruta con la cadena
+   * de fallos (`consecutiveFailures` + 1) y sin bajar del modelo que falló; tras
+   * `escalateAfterFailures` fallos seguidos sube un nivel. Si la ejecución fallida era una
+   * reanudación, el prompt y la cadena salen del inicio de esa sesión.
+   */
+  retry(workspaceId: string, agentId: string, runId: string, input: RetryInput): Run {
+    const agent = this.requireAgent(workspaceId, agentId)
+    const failed = this.deps.store.getRun(workspaceId, runId)
+    if (!failed || failed.agentId !== agent.id) throw new NotFoundError('Ejecución no encontrada')
+    if (this.deps.store.lastRun(workspaceId, agent.id)?.id !== failed.id) {
+      throw new ConflictError(RETRY_NOT_LAST_MESSAGE)
+    }
+    if (failed.status !== 'error') throw new ConflictError(RETRY_NOT_FAILED_MESSAGE)
+    // Un tope no es un fallo: no se reintenta (con presupuesto completo y escalando) ni cuenta
+    // para la cadena de fallos. 409 y no 429: esperar no libera saldo.
+    if (this.deps.store.runEndReason(workspaceId, failed.id) !== null) {
+      throw new ConflictError(RETRY_LIMIT_HIT_MESSAGE)
+    }
+    this.assertCanLaunch(agent)
+    const origin = this.deps.store.sessionStartRun(workspaceId, agent.id) ?? failed
+    const consecutiveFailures = origin.consecutiveFailures + 1
+    const result = this.decide({
+      prompt: origin.prompt,
+      role: agent.role,
+      consecutiveFailures,
+      previousModel: failed.model,
+      ...(input.model ? { requestedModel: input.model } : {}),
+    })
+    return this.launch(workspaceId, agent, {
+      prompt: origin.prompt,
+      model: result.decision.model,
+      maxBudgetUsd: this.deps.config.maxCostUsdPerTask,
+      routed: { result, retryOfRunId: failed.id, consecutiveFailures },
+    })
   }
 
   async pause(workspaceId: string, agentId: string): Promise<Agent> {
@@ -211,15 +308,26 @@ export class AgentManager {
     const spent = sessionSpentUsd(runs)
     const remaining = this.deps.config.maxCostUsdPerTask - spent
     if (remaining < MIN_RESUME_BUDGET_USD) throw new ConflictError(BUDGET_EXHAUSTED_MESSAGE)
-    const model = this.deps.store.lastRun(workspaceId, agent.id)?.model ?? agent.defaultModel
-    return this.launch(
-      workspaceId,
-      agent,
-      input.prompt ?? DEFAULT_RESUME_PROMPT,
-      model,
-      remaining,
-      agent.sdkSessionId,
-    )
+    // Una reanudación no re-enruta: sigue con el modelo de la ejecución original y conserva
+    // la cadena de fallos; no guarda decisión ni emite `router.decision`. `agent.defaultModel`
+    // solo respalda el caso de una sesión sin ejecuciones guardadas.
+    const last = this.deps.store.lastRun(workspaceId, agent.id)
+    const model = last?.model ?? agent.defaultModel
+    const consecutiveFailures = last?.consecutiveFailures ?? 0
+    const prompt = input.prompt ?? DEFAULT_RESUME_PROMPT
+    // Excepción: un prompt nuevo sí pasa por el piso de riesgo (solo el riesgo, no el tamaño).
+    // Si toca un tema sensible y la sesión va por debajo del piso, sube al piso y eso es una
+    // decisión del enrutador: se guarda y se emite `router.decision`.
+    const floored = input.prompt ? this.resumeRiskFloor(input.prompt, model) : undefined
+    return this.launch(workspaceId, agent, {
+      prompt,
+      model: floored?.decision.model ?? model,
+      maxBudgetUsd: remaining,
+      resume: agent.sdkSessionId,
+      ...(floored
+        ? { routed: { result: floored, retryOfRunId: null, consecutiveFailures } }
+        : { stored: { ...NO_ROUTING, consecutiveFailures } }),
+    })
   }
 
   async stop(workspaceId: string, agentId: string): Promise<Agent> {
@@ -326,20 +434,60 @@ export class AgentManager {
     }
   }
 
-  private launch(
-    workspaceId: string,
-    agent: Agent,
-    prompt: string,
-    model: ModelTier,
-    maxBudgetUsd: number,
-    resume?: string,
-  ): Run {
+  /**
+   * Piso de riesgo para el prompt nuevo de una reanudación. Devuelve una decisión solo si
+   * el prompt es de riesgo alto y el modelo de la sesión está por debajo de
+   * `RISK_FLOOR_MODEL` ("nada sensible baja de sonnet"); si no, `undefined` (se conserva el
+   * modelo de la sesión, sin decisión). No se baja nunca un modelo ni se escala.
+   */
+  private resumeRiskFloor(prompt: string, sessionModel: ModelTier): RouteResult | undefined {
+    const { risk, keyword } = classifyPromptRisk(prompt, this.routerConfig.get())
+    if (
+      risk !== 'high' ||
+      MODEL_ORDER.indexOf(sessionModel) >= MODEL_ORDER.indexOf(RISK_FLOOR_MODEL)
+    ) {
+      return undefined
+    }
+    return {
+      decision: {
+        model: RISK_FLOOR_MODEL,
+        size: 'unknown',
+        risk,
+        reasons: [
+          'Reanudación con prompt nuevo: solo se evalúa el riesgo.',
+          `Menciona un tema sensible ("${keyword}"): riesgo alto.`,
+          `Piso de riesgo: ${sessionModel} → ${RISK_FLOOR_MODEL}.`,
+        ],
+        source: 'rule',
+      },
+      warnings: [],
+    }
+  }
+
+  /** Decisión del enrutador con la configuración vigente (función pura, ver `route.ts`). */
+  private decide(input: RouteInput): RouteResult {
+    return route(input, this.routerConfig.get())
+  }
+
+  private launch(workspaceId: string, agent: Agent, opts: LaunchOptions): Run {
+    const { prompt, model, maxBudgetUsd, resume, routed } = opts
     const project = this.deps.store.getProject(workspaceId, agent.projectId)
     if (!project) throw new ValidationError('projectId: el proyecto no existe')
     // Un proyecto guardado antes de endurecer las reglas no se usa sin revalidarlo.
     const projectPath = revalidateProjectPath(project.path, { dataDir: this.deps.config.dataDir })
     const cwd = assertCwdInProject(projectPath)
 
+    const decision = routed?.result.decision
+    const routing: RunRouting = routed
+      ? {
+          taskSize: routed.result.decision.size,
+          risk: routed.result.decision.risk,
+          routingSource: routed.result.decision.source,
+          routingReasons: routed.result.decision.reasons,
+          retryOfRunId: routed.retryOfRunId,
+          consecutiveFailures: routed.consecutiveFailures,
+        }
+      : (opts.stored ?? NO_ROUTING)
     // Se guarda el presupuesto concedido: si la ejecución termina sin `result` (costo nulo),
     // al reanudar se descuenta entero (ver `sessionSpentUsd`).
     const run = this.deps.store.createRun(
@@ -349,6 +497,7 @@ export class AgentManager {
       model,
       Boolean(resume),
       maxBudgetUsd,
+      routing,
     )
     if (!resume) this.deps.store.setAgentSession(workspaceId, agent.id, null)
     this.deps.store.setAgentStatus(workspaceId, agent.id, 'thinking')
@@ -367,6 +516,22 @@ export class AgentManager {
     const live: LiveRun = { workspaceId, agentId: agent.id, run, handle, abort, status: 'thinking' }
     this.live.set(agent.id, live)
     this.emit(workspaceId, statusEvent(agent.id, run.id, 'thinking'))
+    // La decisión ya se tomó y se guardó antes de lanzar; su evento va justo después de
+    // `agent.status = thinking` (que sigue siendo el primero, criterio C001-5) y antes de
+    // cualquier evento del runner, que se consume de forma asíncrona.
+    if (routed && decision) {
+      const base = { agentId: agent.id, runId: run.id, at: Date.now() }
+      this.emit(workspaceId, {
+        type: 'router.decision',
+        ...base,
+        decision,
+        retryOfRunId: routed.retryOfRunId,
+        consecutiveFailures: routed.consecutiveFailures,
+      })
+      for (const message of routed.result.warnings) {
+        this.emit(workspaceId, { type: 'router.warning', ...base, message })
+      }
+    }
 
     const p = this.consume(live).finally(() => this.pending.delete(p))
     live.drained = p
@@ -387,6 +552,7 @@ export class AgentManager {
       }
       if (live.ended) return
       if (live.limitHit) {
+        this.saveLimitEndReason(live)
         this.finish(live, 'error')
         this.emitError(live, LIMIT_MESSAGES[live.limitHit])
       } else {
@@ -400,6 +566,8 @@ export class AgentManager {
       }
       if (live.ended) return
       this.logError(live, 'la ejecución falló', err)
+      // Si ya había alcanzado un tope, sigue sin poder reintentarse con presupuesto completo.
+      this.saveLimitEndReason(live)
       this.finish(live, 'error')
       this.emitError(live, GENERIC_RUN_ERROR)
     } finally {
@@ -441,6 +609,19 @@ export class AgentManager {
         return
       }
     }
+  }
+
+  /**
+   * Guarda en `runs.end_reason` que la ejecución se cortó por tope (si se cortó). Va antes
+   * de `finish`: quien vea `agent.status = error` ya encuentra el motivo guardado.
+   */
+  private saveLimitEndReason(live: LiveRun): void {
+    if (!live.limitHit) return
+    this.deps.store.setRunEndReason(
+      live.workspaceId,
+      live.run.id,
+      live.limitHit === 'turns' ? 'limit_turns' : 'limit_budget',
+    )
   }
 
   private saveTotals(live: LiveRun, ev: UsageEvent): RunTotals {

@@ -108,6 +108,99 @@ describe('migraciones', () => {
     h.close()
   })
 
+  it('una base en la versión 4 sube con las columnas del enrutador (sin decisión en filas previas)', () => {
+    // La migración 6 (`end_reason`) llegó después: la base sube hasta la última.
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(5)
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cdm-mig-')), 'data.db')
+    const v4 = new Database(file)
+    for (const m of MIGRATIONS.slice(0, 4)) v4.exec(m)
+    v4.pragma('user_version = 4')
+    v4.exec(`
+      INSERT INTO projects VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ0', 'local', 'P', 'C:/p', 1);
+      INSERT INTO agents VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ1', 'local', '01JABCDEFGHJKMNPQRSTVWXYZ0',
+        'A', 'qa', 'sonnet', 'done', NULL, 1, 1);
+      INSERT INTO runs (id, agent_id, prompt, model, status, cost_usd, started_at, workspace_id, resumed, budget_usd)
+        VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ2', '01JABCDEFGHJKMNPQRSTVWXYZ1', 'x', 'sonnet', 'error',
+        0.1, 1, 'local', 0, 2);
+    `)
+    v4.close()
+
+    const h = openDb(file)
+    expect(h.sqlite.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length)
+    const columns = (
+      h.sqlite.prepare('PRAGMA table_info(runs)').all() as Array<{ name: string }>
+    ).map((c) => c.name)
+    for (const name of [
+      'task_size',
+      'risk',
+      'routing_source',
+      'routing_reasons',
+      'retry_of_run_id',
+      'consecutive_failures',
+    ]) {
+      expect(columns).toContain(name)
+    }
+    const store = createStore(h.db)
+    const agentId = '01JABCDEFGHJKMNPQRSTVWXYZ1'
+    const previous = '01JABCDEFGHJKMNPQRSTVWXYZ2'
+    expect(store.getRun('local', previous)).toMatchObject({
+      taskSize: null,
+      risk: null,
+      routingSource: null,
+      routingReasons: [],
+      retryOfRunId: null,
+      consecutiveFailures: 0,
+    })
+    const retry = store.createRun('local', agentId, 'x', 'opus', false, 2, {
+      taskSize: 'large',
+      risk: 'high',
+      routingSource: 'escalation',
+      routingReasons: ['razón'],
+      retryOfRunId: previous,
+      consecutiveFailures: 2,
+    })
+    expect(store.getRun('local', retry.id)).toMatchObject({
+      routingSource: 'escalation',
+      routingReasons: ['razón'],
+      retryOfRunId: previous,
+      consecutiveFailures: 2,
+    })
+    // Otro workspace no ve la ejecución.
+    expect(store.getRun('otro', retry.id)).toBeUndefined()
+    h.close()
+  })
+
+  it('una base en la versión 5 sube a la 6 con end_reason en NULL para filas previas', () => {
+    expect(MIGRATIONS.length).toBe(6)
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cdm-mig-')), 'data.db')
+    const v5 = new Database(file)
+    for (const m of MIGRATIONS.slice(0, 5)) v5.exec(m)
+    v5.pragma('user_version = 5')
+    v5.exec(`
+      INSERT INTO projects VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ0', 'local', 'P', 'C:/p', 1);
+      INSERT INTO agents VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ1', 'local', '01JABCDEFGHJKMNPQRSTVWXYZ0',
+        'A', 'qa', 'sonnet', 'error', NULL, 1, 1);
+      INSERT INTO runs (id, agent_id, prompt, model, status, started_at, workspace_id)
+        VALUES ('01JABCDEFGHJKMNPQRSTVWXYZ2', '01JABCDEFGHJKMNPQRSTVWXYZ1', 'x', 'sonnet', 'error',
+        1, 'local');
+    `)
+    v5.close()
+
+    const h = openDb(file)
+    expect(h.sqlite.pragma('user_version', { simple: true })).toBe(6)
+    const store = createStore(h.db)
+    const runId = '01JABCDEFGHJKMNPQRSTVWXYZ2'
+    expect(store.runEndReason('local', runId)).toBeNull()
+    store.setRunEndReason('otro', runId, 'limit_budget')
+    // Escritura filtrada por workspace: otro workspace no la marca.
+    expect(store.runEndReason('local', runId)).toBeNull()
+    store.setRunEndReason('local', runId, 'limit_budget')
+    expect(store.runEndReason('local', runId)).toBe('limit_budget')
+    expect(store.runEndReason('otro', runId)).toBeNull()
+    expect(store.getRun('local', runId)).not.toHaveProperty('endReason')
+    h.close()
+  })
+
   it('abrir dos veces no vuelve a aplicar migraciones', () => {
     const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cdm-mig-')), 'data.db')
     openDb(file).close()

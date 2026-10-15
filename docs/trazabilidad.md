@@ -3,7 +3,7 @@
 Generado por `scripts/trazabilidad.py`; no editar a mano.
 CI falla si está desactualizado.
 
-Criterios: 32 · cubiertos: 11 · sin test en features activas: 0
+Criterios: 32 · cubiertos: 21 · sin test en features activas: 0
 
 | Criterio | Feature | Estado | Tests |
 |---|---|---|---|
@@ -11,7 +11,7 @@ Criterios: 32 · cubiertos: 11 · sin test en features activas: 0
 | C001-2 | 001-motor-de-agentes | cubierto | apps\engine\test\engine.test.ts |
 | C001-3 | 001-motor-de-agentes | cubierto | apps\engine\test\engine.test.ts |
 | C001-4 | 001-motor-de-agentes | cubierto | apps\engine\test\engine.test.ts |
-| C001-5 | 001-motor-de-agentes | cubierto | apps\engine\test\engine.test.ts |
+| C001-5 | 001-motor-de-agentes | cubierto | apps\engine\src\agents\manager-router.test.ts, apps\engine\test\engine.test.ts |
 | C001-6 | 001-motor-de-agentes | cubierto | apps\engine\test\engine.test.ts |
 | C001-7 | 001-motor-de-agentes | cubierto | apps\engine\test\engine.test.ts |
 | C001-8 | 001-motor-de-agentes | cubierto | apps\engine\test\engine.test.ts |
@@ -29,13 +29,13 @@ Criterios: 32 · cubiertos: 11 · sin test en features activas: 0
 | C002-9 | 002-bus-de-mensajes | pendiente | — |
 | C002-10 | 002-bus-de-mensajes | pendiente | — |
 | C002-11 | 002-bus-de-mensajes | pendiente | — |
-| C003-1 | 003-enrutador-de-modelos | pendiente | — |
-| C003-2 | 003-enrutador-de-modelos | pendiente | — |
-| C003-3 | 003-enrutador-de-modelos | pendiente | — |
-| C003-4 | 003-enrutador-de-modelos | pendiente | — |
-| C003-5 | 003-enrutador-de-modelos | pendiente | — |
-| C003-6 | 003-enrutador-de-modelos | pendiente | — |
-| C003-7 | 003-enrutador-de-modelos | pendiente | — |
-| C003-8 | 003-enrutador-de-modelos | pendiente | — |
-| C003-9 | 003-enrutador-de-modelos | pendiente | — |
-| C003-10 | 003-enrutador-de-modelos | pendiente | — |
+| C003-1 | 003-enrutador-de-modelos | cubierto | apps\engine\src\agents\manager-router.test.ts, apps\engine\test\router.test.ts, packages\shared\src\schemas\router.test.ts |
+| C003-2 | 003-enrutador-de-modelos | cubierto | apps\engine\src\router\route-adversarial.test.ts, apps\engine\src\router\route.test.ts |
+| C003-3 | 003-enrutador-de-modelos | cubierto | apps\engine\src\router\route.test.ts |
+| C003-4 | 003-enrutador-de-modelos | cubierto | apps\engine\src\agents\manager-router.test.ts, apps\engine\src\router\route-adversarial.test.ts, apps\engine\src\router\route.test.ts |
+| C003-5 | 003-enrutador-de-modelos | cubierto | apps\engine\src\agents\manager-router-audit.test.ts, apps\engine\src\agents\manager-router.test.ts, apps\engine\src\router\classifier.test.ts, apps\engine\src\router\route-adversarial.test.ts, apps\engine\src\router\route.test.ts |
+| C003-6 | 003-enrutador-de-modelos | cubierto | apps\engine\src\agents\manager-router.test.ts, apps\engine\src\router\route-adversarial.test.ts, apps\engine\src\router\route.test.ts, apps\engine\test\router-adversarial.test.ts, apps\engine\test\router.test.ts |
+| C003-7 | 003-enrutador-de-modelos | cubierto | apps\engine\src\agents\manager-router-audit.test.ts, apps\engine\src\agents\manager-router.test.ts, apps\engine\src\router\route-adversarial.test.ts, apps\engine\src\router\route.test.ts, apps\engine\test\router-adversarial.test.ts, apps\engine\test\router.test.ts |
+| C003-8 | 003-enrutador-de-modelos | cubierto | apps\engine\src\agents\manager-router.test.ts, apps\engine\src\router\config-store.test.ts, apps\engine\test\router-adversarial.test.ts, apps\engine\test\router.test.ts |
+| C003-9 | 003-enrutador-de-modelos | cubierto | apps\engine\src\router\stats-adversarial.test.ts, apps\engine\src\router\stats.test.ts, apps\engine\test\router-adversarial.test.ts, apps\engine\test\router.test.ts |
+| C003-10 | 003-enrutador-de-modelos | cubierto | apps\engine\src\router\route-adversarial.test.ts, apps\engine\src\router\route.test.ts |

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { RiskLevel, RoutingSource, TaskSize } from './routing.ts'
 
 export const AgentRole = z.enum([
   'coordinador',
@@ -89,5 +90,14 @@ export const Run = z.object({
   contextUsedPct: z.number().min(0).max(100).nullable(),
   startedAt: z.number().int(),
   endedAt: z.number().int().nullable(),
+  /** Decisión del enrutador (feature 003); `null` en ejecuciones previas a la migración 5. */
+  taskSize: TaskSize.nullable(),
+  risk: RiskLevel.nullable(),
+  routingSource: RoutingSource.nullable(),
+  routingReasons: z.array(z.string()),
+  /** Ejecución fallida de la que esta es reintento (`null` si no es un reintento). */
+  retryOfRunId: Id.nullable(),
+  /** Fallos seguidos de la cadena de reintentos antes de esta ejecución (0 en una tarea nueva). */
+  consecutiveFailures: z.number().int().nonnegative(),
 })
 export type Run = z.infer<typeof Run>

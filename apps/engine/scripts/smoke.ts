@@ -55,29 +55,52 @@ try {
     ws.once('open', resolve)
     ws.once('error', reject)
   })
-  const done = new Promise<void>((resolve) => {
-    ws.on('message', (data) => {
-      const e = JSON.parse(data.toString()) as EngineEvent
-      events.push(e)
-      if (e.type === 'agent.status' && e.status === 'done') resolve()
-    })
+  let onDone: ((runId: string) => void) | undefined
+  ws.on('message', (data) => {
+    const e = JSON.parse(data.toString()) as EngineEvent
+    events.push(e)
+    if (e.type === 'agent.status' && e.status === 'done') onDone?.(e.runId)
   })
 
   const { project } = await post('/projects', { name: 'Humo', path: projectDir })
   const { agent } = await post('/agents', { name: 'Humo', role: 'qa', projectId: project.id })
-  const { runId } = await post(`/agents/${agent.id}/tasks`, { prompt: 'Prueba de humo' })
 
-  await Promise.race([
-    done,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
-  ]).catch(() => fail('no llegó agent.status = done'))
+  // Enrutador (feature 003): trivial → haiku, sin señales → modelo del rol (qa → sonnet),
+  // grande → opus. Una tarea a la vez (el agente no acepta dos simultáneas).
+  const cases = [
+    { prompt: 'Cambia el color del botón a azul', model: 'haiku', source: 'rule' },
+    { prompt: 'Prueba de humo', model: 'sonnet', source: 'role_default' },
+    { prompt: 'Diseña la arquitectura del módulo de reportes', model: 'opus', source: 'rule' },
+  ] as const
+  for (const c of cases) {
+    const finished = new Promise<string>((resolve) => {
+      onDone = resolve
+    })
+    const { runId } = await post(`/agents/${agent.id}/tasks`, { prompt: c.prompt })
+    await Promise.race([
+      finished.then((id) => (id === runId ? undefined : fail('done de otra ejecución'))),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
+    ]).catch(() => fail(`no llegó agent.status = done para "${c.prompt}"`))
 
-  const seq = events.filter((e) => e.runId === runId).map((e) => e.type)
-  const first = events[0]
-  if (first?.type !== 'agent.status' || first.status !== 'thinking')
-    fail('primer evento incorrecto')
-  if (seq.at(-2) !== 'agent.usage') fail(`se esperaba agent.usage antes de done: ${seq.join(', ')}`)
-  console.log(`✓ humo OK: ${seq.join(' → ')}`)
+    const mine = events.filter((e) => e.runId === runId)
+    const seq = mine.map((e) => e.type)
+    const first = mine[0]
+    if (first?.type !== 'agent.status' || first.status !== 'thinking') {
+      fail(`primer evento incorrecto: ${seq.join(', ')}`)
+    }
+    const decision = mine[1]
+    if (decision?.type !== 'router.decision') {
+      fail(`se esperaba router.decision tras agent.status = thinking: ${seq.join(', ')}`)
+    }
+    if (decision.decision.model !== c.model || decision.decision.source !== c.source) {
+      fail(
+        `"${c.prompt}" → ${decision.decision.model} (${decision.decision.source}); se esperaba ${c.model} (${c.source})`,
+      )
+    }
+    if (seq.at(-2) !== 'agent.usage')
+      fail(`se esperaba agent.usage antes de done: ${seq.join(', ')}`)
+    console.log(`✓ humo OK (${c.model}): ${seq.join(' → ')}`)
+  }
   ws.close()
 } finally {
   await app.close()

@@ -6,8 +6,10 @@ import type { EngineConfig } from './config.ts'
 import type { Store } from './db/store.ts'
 import { registerErrorHandler } from './errors/index.ts'
 import { EventHub } from './events/hub.ts'
+import { createRouterConfigStore, type RouterConfigStore } from './router/config-store.ts'
 import { agentRoutes } from './routes/agents.ts'
 import { projectRoutes } from './routes/projects.ts'
+import { routerRoutes } from './routes/router.ts'
 import { wsRoutes } from './routes/ws.ts'
 import { registerGuards } from './security/guards.ts'
 import { createRateLimits } from './security/rate-limit.ts'
@@ -22,12 +24,15 @@ export interface BuildServerOptions {
   logLevel?: string
   /** Reloj del rate limit en ms (tests). Por defecto, `Date.now`. */
   now?: () => number
+  /** Configuración del enrutador. Por defecto, `router-config.json` en `config.dataDir`. */
+  routerConfig?: RouterConfigStore
 }
 
 export interface Engine {
   app: FastifyInstance
   manager: AgentManager
   hub: EventHub
+  routerConfig: RouterConfigStore
 }
 
 export const BODY_LIMIT_BYTES = 128 * 1024
@@ -46,6 +51,9 @@ export async function buildServer(opts: BuildServerOptions): Promise<Engine> {
     },
   })
   const hub = new EventHub()
+  const routerConfig =
+    opts.routerConfig ??
+    createRouterConfigStore(opts.config.dataDir, { onWarning: (message) => app.log.warn(message) })
   const manager = new AgentManager({
     store: opts.store,
     runner: opts.runner,
@@ -53,6 +61,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<Engine> {
     config: opts.config,
     logger: app.log,
     secrets: [opts.token],
+    routerConfig,
   })
 
   registerErrorHandler(app)
@@ -78,11 +87,12 @@ export async function buildServer(opts: BuildServerOptions): Promise<Engine> {
   app.get('/health', async () => ({ ok: true }))
   projectRoutes(app, opts.store, opts.config.dataDir, limits)
   agentRoutes(app, manager, limits)
+  routerRoutes(app, { store: opts.store, routerConfig }, limits)
   wsRoutes(app, hub, opts.token)
 
   app.addHook('onClose', async () => {
     await manager.shutdown()
   })
 
-  return { app, manager, hub }
+  return { app, manager, hub, routerConfig }
 }

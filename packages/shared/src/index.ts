@@ -1,3 +1,5 @@
 export * from './schemas/agent.ts'
 export * from './schemas/events.ts'
 export * from './schemas/project.ts'
+export * from './schemas/router.ts'
+export * from './schemas/routing.ts'
