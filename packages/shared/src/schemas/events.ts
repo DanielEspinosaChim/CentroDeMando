@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { AgentStatus, Id } from './agent.ts'
+import { USER_SENDER } from './message.ts'
 import { RoutingDecision } from './router.ts'
 
 const base = { agentId: Id, runId: Id, at: z.number().int() }
@@ -54,6 +55,34 @@ export const RouterWarningEvent = z.object({
   message: z.string(),
 })
 
+/**
+ * Base de los eventos del bus (feature 002): `agentId`/`runId` son del agente remitente y
+ * de la ejecución desde la que envió; `null` si el remitente es el usuario.
+ */
+const busBase = { agentId: Id.nullable(), runId: Id.nullable(), at: z.number().int() }
+
+/** Un mensaje guardado (una entrega por destinatario). */
+export const BusMessageEvent = z.object({
+  type: z.literal('bus.message'),
+  ...busBase,
+  id: Id,
+  from: z.union([Id, z.literal(USER_SENDER)]),
+  to: Id,
+  threadId: Id,
+  replyToId: Id.nullable(),
+  wake: z.boolean(),
+  depth: z.number().int().nonnegative(),
+})
+
+/** Freno del bus: límite de mensajes por minuto o profundidad máxima de despertares. */
+export const BusLimitEvent = z.object({
+  type: z.literal('bus.limit'),
+  ...busBase,
+  reason: z.enum(['rate_limit', 'max_depth']),
+  threadId: Id.nullable(),
+  message: z.string(),
+})
+
 export const EngineEvent = z.discriminatedUnion('type', [
   AgentStatusEvent,
   AgentOutputEvent,
@@ -62,6 +91,8 @@ export const EngineEvent = z.discriminatedUnion('type', [
   AgentErrorEvent,
   RouterDecisionEvent,
   RouterWarningEvent,
+  BusMessageEvent,
+  BusLimitEvent,
 ])
 export type EngineEvent = z.infer<typeof EngineEvent>
 export type EngineEventType = EngineEvent['type']

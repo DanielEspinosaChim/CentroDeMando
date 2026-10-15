@@ -71,7 +71,9 @@ ws.on('message', (d) => {
             ? `in=${e.inputTokens} out=${e.outputTokens} $${e.costUsd.toFixed(4)} ctx=${e.contextUsedPct}%`
             : e.type === 'router.decision'
               ? `${e.decision.model} (${e.decision.source})`
-              : e.message
+              : e.type === 'bus.message'
+                ? `${e.from} → ${e.to} (hilo ${e.threadId})`
+                : e.message
   console.log(`  ${e.type} ${extra}`)
 })
 
