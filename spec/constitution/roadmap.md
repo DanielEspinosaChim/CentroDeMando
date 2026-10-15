@@ -11,7 +11,7 @@ opcional. Los números de feature (00X) corresponden a las carpetas en
    Todo lo demás se monta encima.
 2. **[002-bus-de-mensajes]** — Mensajería entre agentes (directa y a todos), con
    bandeja por agente. Base de la coordinación y de lo que se dibuja en la UI.
-3. **[003-enrutador-de-modelos]** — Elige Haiku / Sonnet / Opus por tarea según
+3. ✅ **[003-enrutador-de-modelos]** — Elige Haiku / Sonnet / Opus por tarea según
    tamaño y riesgo, con escalamiento automático y piso de seguridad. Explica cada
    decisión.
 4. **[004-flujo-sdd]** — Orquestación con tus skills de SDD: coordinador → planeador
