@@ -1,8 +1,18 @@
-import type { Agent, AgentStatus, ModelTier, Project, Run } from '@cdm/shared'
-import { and, desc, eq, inArray } from 'drizzle-orm'
+import type {
+  Agent,
+  AgentStatus,
+  ModelTier,
+  Project,
+  RiskLevel,
+  RoutingSource,
+  Run,
+  TaskSize,
+} from '@cdm/shared'
+import { and, asc, desc, eq, inArray } from 'drizzle-orm'
 import { ulid } from 'ulid'
+import type { StatsRunRow } from '../router/stats.ts'
 import type { Db } from './client.ts'
-import { agents, projects, runs } from './schema.ts'
+import { agents, projects, type RunEndReason, type RunRow, runs } from './schema.ts'
 
 const LIVE_STATUSES: AgentStatus[] = ['thinking', 'running_tool']
 
@@ -19,6 +29,52 @@ export interface RunSpend {
   costUsd: number | null
   /** `maxBudgetUsd` concedido; `null` en filas anteriores a la migración 4. */
   budgetUsd: number | null
+}
+
+/** Decisión del enrutador y cadena de reintentos que se guardan con cada ejecución. */
+export interface RunRouting {
+  taskSize: TaskSize | null
+  risk: RiskLevel | null
+  routingSource: RoutingSource | null
+  routingReasons: string[]
+  retryOfRunId: string | null
+  consecutiveFailures: number
+}
+
+/** Sin decisión (filas creadas fuera del enrutador). */
+export const NO_ROUTING: RunRouting = {
+  taskSize: null,
+  risk: null,
+  routingSource: null,
+  routingReasons: [],
+  retryOfRunId: null,
+  consecutiveFailures: 0,
+}
+
+function parseReasons(raw: string | null): string[] {
+  if (!raw) return []
+  try {
+    const value: unknown = JSON.parse(raw)
+    return Array.isArray(value) ? value.filter((r): r is string => typeof r === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Fila → `Run` de la API (sin los campos internos `workspaceId`, `resumed`, `budgetUsd`,
+ * `endReason`).
+ */
+function toRun(row: RunRow): Run {
+  const {
+    workspaceId: _ws,
+    resumed: _resumed,
+    budgetUsd: _budget,
+    endReason: _endReason,
+    routingReasons,
+    ...run
+  } = row
+  return { ...run, routingReasons: parseReasons(routingReasons) }
 }
 
 /**
@@ -139,6 +195,7 @@ export function createStore(db: Db, now: () => number = Date.now) {
       model: ModelTier,
       resumed = false,
       budgetUsd: number | null = null,
+      routing: RunRouting = NO_ROUTING,
     ): Run {
       const row: Run = {
         id: ulid(),
@@ -152,9 +209,17 @@ export function createStore(db: Db, now: () => number = Date.now) {
         contextUsedPct: null,
         startedAt: now(),
         endedAt: null,
+        ...routing,
+        routingReasons: [...routing.routingReasons],
       }
       db.insert(runs)
-        .values({ ...row, workspaceId, resumed, budgetUsd })
+        .values({
+          ...row,
+          workspaceId,
+          resumed,
+          budgetUsd,
+          routingReasons: JSON.stringify(row.routingReasons),
+        })
         .run()
       return row
     },
@@ -173,6 +238,24 @@ export function createStore(db: Db, now: () => number = Date.now) {
         .run()
     },
 
+    /** Marca que la ejecución terminó por tope de turnos o de costo (interno). */
+    setRunEndReason(workspaceId: string, runId: string, endReason: RunEndReason): void {
+      db.update(runs)
+        .set({ endReason })
+        .where(and(eq(runs.workspaceId, workspaceId), eq(runs.id, runId)))
+        .run()
+    },
+
+    /** Motivo de fin por tope de la ejecución, o `null` (también si no existe en el workspace). */
+    runEndReason(workspaceId: string, runId: string): RunEndReason | null {
+      const row = db
+        .select({ endReason: runs.endReason })
+        .from(runs)
+        .where(and(eq(runs.workspaceId, workspaceId), eq(runs.id, runId)))
+        .get()
+      return row?.endReason ?? null
+    },
+
     sessionRunSpend,
 
     /** Solo los `costUsd` de `sessionRunSpend` (`null` si la ejecución no reportó costo). */
@@ -188,9 +271,52 @@ export function createStore(db: Db, now: () => number = Date.now) {
         .orderBy(desc(runs.startedAt), desc(runs.id))
         .limit(1)
         .get()
-      if (!row) return undefined
-      const { workspaceId: _ws, resumed: _resumed, budgetUsd: _budget, ...run } = row
-      return run
+      return row ? toRun(row) : undefined
+    },
+
+    getRun(workspaceId: string, runId: string): Run | undefined {
+      const row = db
+        .select()
+        .from(runs)
+        .where(and(eq(runs.workspaceId, workspaceId), eq(runs.id, runId)))
+        .get()
+      return row ? toRun(row) : undefined
+    },
+
+    /**
+     * Primera ejecución de la sesión actual del agente (su último inicio no reanudado):
+     * tiene el prompt original de la tarea, que es el que se reintenta.
+     */
+    sessionStartRun(workspaceId: string, agentId: string): Run | undefined {
+      const row = db
+        .select()
+        .from(runs)
+        .where(
+          and(
+            eq(runs.workspaceId, workspaceId),
+            eq(runs.agentId, agentId),
+            eq(runs.resumed, false),
+          ),
+        )
+        .orderBy(desc(runs.startedAt), desc(runs.id))
+        .limit(1)
+        .get()
+      return row ? toRun(row) : undefined
+    },
+
+    /** Filas para `GET /router/stats`, solo del workspace, por agente y en orden cronológico. */
+    routerStatsRows(workspaceId: string): StatsRunRow[] {
+      return db
+        .select({
+          agentId: runs.agentId,
+          model: runs.model,
+          costUsd: runs.costUsd,
+          resumed: runs.resumed,
+        })
+        .from(runs)
+        .where(eq(runs.workspaceId, workspaceId))
+        .orderBy(asc(runs.agentId), asc(runs.startedAt), asc(runs.id))
+        .all()
     },
 
     /** Al arrancar: lo que estaba en curso cuando se cayó el motor queda `interrupted`. */

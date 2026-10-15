@@ -2,6 +2,9 @@
 
 Estado: LISTO PARA IMPLEMENTAR
 
+Nivel de riesgo: **Mediano** (varios archivos y lógica nueva; toca el piso de seguridad de
+credenciales/pagos/permisos, que la auditoría revisa de forma explícita).
+
 ## Qué hace
 
 Decide con qué modelo (Haiku, Sonnet u Opus) corre cada tarea según su tamaño y

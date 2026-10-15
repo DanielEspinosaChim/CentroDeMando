@@ -1,5 +1,23 @@
-import type { AgentRole, AgentStatus, ModelTier } from '@cdm/shared'
-import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
+import type {
+  AgentRole,
+  AgentStatus,
+  ModelTier,
+  RiskLevel,
+  RoutingSource,
+  TaskSize,
+} from '@cdm/shared'
+import {
+  type AnySQLiteColumn,
+  index,
+  integer,
+  real,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from 'drizzle-orm/sqlite-core'
+
+/** Motivo de fin que se guarda en `runs.end_reason` (solo los topes). */
+export type RunEndReason = 'limit_turns' | 'limit_budget'
 
 export const projects = sqliteTable(
   'projects',
@@ -56,6 +74,21 @@ export const runs = sqliteTable(
     resumed: integer('resumed', { mode: 'boolean' }).notNull().default(false),
     /** Interno (no sale en la API): `maxBudgetUsd` concedido a la ejecución; NULL en filas previas. */
     budgetUsd: real('budget_usd'),
+    /** Decisión del enrutador (migración 5); NULL en filas previas. */
+    taskSize: text('task_size').$type<TaskSize>(),
+    risk: text('risk').$type<RiskLevel>(),
+    routingSource: text('routing_source').$type<RoutingSource>(),
+    /** JSON: arreglo de razones legibles. */
+    routingReasons: text('routing_reasons'),
+    retryOfRunId: text('retry_of_run_id').references((): AnySQLiteColumn => runs.id, {
+      onDelete: 'set null',
+    }),
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    /**
+     * Interno (no sale en la API, migración 6): la ejecución terminó por tope de turnos o de
+     * costo. NULL si terminó de otra forma o en filas previas.
+     */
+    endReason: text('end_reason').$type<RunEndReason>(),
   },
   (t) => [index('runs_agent_idx').on(t.agentId), index('runs_workspace_idx').on(t.workspaceId)],
 )

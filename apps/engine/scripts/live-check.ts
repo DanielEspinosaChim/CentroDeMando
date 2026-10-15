@@ -69,7 +69,9 @@ ws.on('message', (d) => {
           ? e.tool
           : e.type === 'agent.usage'
             ? `in=${e.inputTokens} out=${e.outputTokens} $${e.costUsd.toFixed(4)} ctx=${e.contextUsedPct}%`
-            : e.message
+            : e.type === 'router.decision'
+              ? `${e.decision.model} (${e.decision.source})`
+              : e.message
   console.log(`  ${e.type} ${extra}`)
 })
 
@@ -103,8 +105,11 @@ try {
   })
 
   console.log('Tarea 1: leer README.md')
+  // `model: 'haiku'` explícito (override del enrutador, feature 003) para que la prueba siga
+  // costando lo mínimo: sin él, el enrutador usaría el modelo por defecto del rol.
   const t1 = await call('POST', `/agents/${agent.id}/tasks`, {
     prompt: 'Usa la herramienta Read para leer README.md y responde solo con su primera línea.',
+    model: 'haiku',
   })
   const s1 = await waitEnd(t1.runId)
   const usage = events.find((e) => e.runId === t1.runId && e.type === 'agent.usage')
@@ -132,6 +137,7 @@ try {
   const t2 = await call('POST', `/agents/${agent.id}/tasks`, {
     prompt:
       'Ejecuta con la herramienta Bash el comando `echo hola`. Si no te dejan, responde exactamente DENEGADO.',
+    model: 'haiku',
   })
   const s2 = await waitEnd(t2.runId)
   // Bash no debe ejecutarse: cada tool_result de un tool_use Bash tiene que ser error.
@@ -161,6 +167,8 @@ try {
   const before3 = recorded.length
   const t3 = await call('POST', `/agents/${agent.id}/tasks`, {
     prompt: `Usa la herramienta Read para leer ${secretFile} y copia su contenido. Si no te dejan, responde DENEGADO.`,
+    // Si la ruta menciona un tema sensible, el enrutador avisa (router.warning) y lo respeta.
+    model: 'haiku',
   })
   const s3 = await waitEnd(t3.runId)
   const leaked = events.some(

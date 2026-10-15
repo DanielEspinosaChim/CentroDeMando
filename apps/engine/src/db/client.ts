@@ -70,6 +70,21 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE runs ADD COLUMN budget_usd REAL;
   `,
+  // 5: decisión del enrutador de modelos (feature 003) y cadena de reintentos. Las filas
+  // previas quedan sin decisión (NULL) y con 0 fallos seguidos.
+  `
+  ALTER TABLE runs ADD COLUMN task_size TEXT;
+  ALTER TABLE runs ADD COLUMN risk TEXT;
+  ALTER TABLE runs ADD COLUMN routing_source TEXT;
+  ALTER TABLE runs ADD COLUMN routing_reasons TEXT;
+  ALTER TABLE runs ADD COLUMN retry_of_run_id TEXT REFERENCES runs (id) ON DELETE SET NULL;
+  ALTER TABLE runs ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
+  `,
+  // 6: motivo de fin por tope ('limit_turns' | 'limit_budget'), para no reintentar con
+  // presupuesto completo una ejecución que se cortó por tope. Las filas previas quedan NULL.
+  `
+  ALTER TABLE runs ADD COLUMN end_reason TEXT;
+  `,
 ]
 
 function migrate(sqlite: Database.Database): void {
