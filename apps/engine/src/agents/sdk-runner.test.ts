@@ -7,9 +7,12 @@ import { RunnerError } from './runner.ts'
 import fixtures from './sdk-messages.fixture.json' with { type: 'json' }
 import recording from './sdk-recording.fixture.json' with { type: 'json' }
 import {
+  ALLOWED_BUILTIN_TOOLS,
+  buildSdkOptions,
   createCanUseTool,
   createPreToolUseHook,
   createTranslateState,
+  decideTool,
   translateSdkMessage,
 } from './sdk-runner.ts'
 
@@ -218,5 +221,47 @@ describe('ejecución real grabada (SDK 0.3.296, haiku, Read de README.md)', () =
       // último paso: 2 + 6866 + 151 = 7019 tokens de una ventana de 1 000 000
       contextUsedPct: 0.7,
     })
+  })
+})
+
+describe('buildSdkOptions (bus de mensajes, feature 002)', () => {
+  const cwd = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cdm-opts-')))
+  const base = {
+    prompt: 'x',
+    model: 'sonnet' as const,
+    role: 'qa' as const,
+    cwd,
+    maxTurns: 3,
+    maxBudgetUsd: 0.5,
+    signal: new AbortController().signal,
+  }
+  const busTools = { call: () => ({ ok: true, text: '' }) }
+
+  it('registra solo el servidor MCP del bus del agente, con config estricta y sin bypass', () => {
+    const opts = buildSdkOptions({ ...base, busTools }, new AbortController())
+    expect(Object.keys(opts.mcpServers ?? {})).toEqual(['bus'])
+    expect(opts.mcpServers?.bus).toMatchObject({ type: 'sdk', name: 'bus' })
+    expect(opts.strictMcpConfig).toBe(true)
+    expect(opts.settingSources).toEqual([])
+    expect(opts.permissionMode).toBe('default')
+    expect(opts.tools).toEqual([...ALLOWED_BUILTIN_TOOLS])
+    expect(opts.env?.ENABLE_CLAUDEAI_MCP_SERVERS).toBe('false')
+  })
+
+  it('sin herramientas del bus no hay ningún MCP', () => {
+    expect(buildSdkOptions(base, new AbortController()).mcpServers).toEqual({})
+  })
+
+  it('permite las tres herramientas del bus y sigue negando cualquier otro MCP', () => {
+    for (const tool of [
+      'mcp__bus__send_message',
+      'mcp__bus__read_inbox',
+      'mcp__bus__list_agents',
+    ]) {
+      expect(decideTool(cwd, tool, { to: 'Ana', body: 'x' })).toEqual({ allow: true })
+    }
+    for (const tool of ['mcp__bus__otra', 'mcp__claude_ai_Gmail__send_message', 'mcp__github__x']) {
+      expect(decideTool(cwd, tool, {}).allow).toBe(false)
+    }
   })
 })

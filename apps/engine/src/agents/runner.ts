@@ -1,4 +1,5 @@
 import type { AgentRole, ModelTier } from '@cdm/shared'
+import type { BusTools } from '../bus/tools.ts'
 
 /**
  * Eventos que emite un runner, ya independientes del SDK. El `AgentManager`
@@ -31,6 +32,11 @@ export interface RunOptions {
   /** Tope de costo estimado por tarea, en USD. */
   maxBudgetUsd: number
   signal: AbortSignal
+  /**
+   * Herramientas del bus de mensajes (feature 002) ya atadas a este agente. El runner real
+   * las expone como servidor MCP en proceso; el remitente nunca lo decide el modelo.
+   */
+  busTools?: BusTools
 }
 
 export interface RunHandle {

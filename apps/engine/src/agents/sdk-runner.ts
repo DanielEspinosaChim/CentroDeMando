@@ -9,6 +9,7 @@ import {
   type SDKMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentRole } from '@cdm/shared'
+import { BUS_MCP_TOOL_NAMES, BUS_SERVER_NAME, createBusMcpServer } from '../bus/tools.ts'
 import { isInside, isUncPath } from '../projects/paths.ts'
 import {
   type AgentRunner,
@@ -19,11 +20,18 @@ import {
   type UsageEvent,
 } from './runner.ts'
 
+/** Herramientas integradas de Claude Code que puede usar un agente del motor. */
+export const ALLOWED_BUILTIN_TOOLS: readonly string[] = ['Read', 'Glob', 'Grep', 'TodoWrite']
+
 /**
- * Herramientas permitidas en esta feature. Todo lo demás se deniega hasta que
+ * Herramientas permitidas: las integradas de solo lectura y las tres del bus de mensajes
+ * (feature 002, servidor MCP en proceso del motor). Todo lo demás se deniega hasta que
  * exista la cola de aprobaciones (feature 005). Nunca `bypassPermissions`.
  */
-export const ALLOWED_TOOLS: ReadonlySet<string> = new Set(['Read', 'Glob', 'Grep', 'TodoWrite'])
+export const ALLOWED_TOOLS: ReadonlySet<string> = new Set([
+  ...ALLOWED_BUILTIN_TOOLS,
+  ...BUS_MCP_TOOL_NAMES,
+])
 
 const PATH_INPUT_KEYS = ['file_path', 'path', 'notebook_path'] as const
 /** Campos de patrón (Glob `pattern`, Grep `glob`) que no pueden salir del proyecto. */
@@ -235,6 +243,43 @@ export function translateSdkMessage(msg: SDKMessage, state: TranslateState): Run
   }
 }
 
+/**
+ * Opciones de `query()` para una ejecución. Función aparte para probar la configuración
+ * de seguridad sin llamar al SDK.
+ */
+export function buildSdkOptions(options: RunOptions, abortController: AbortController): Options {
+  return {
+    model: options.model,
+    cwd: options.cwd,
+    systemPrompt: {
+      type: 'preset',
+      preset: 'claude_code',
+      append: `${ROLE_PROMPTS[options.role]}
+${SECURITY_PROMPT}`,
+    },
+    permissionMode: 'default',
+    // Tres capas: solo existen las herramientas permitidas, el hook las revisa todas
+    // y canUseTool cubre lo que pida aprobación.
+    tools: [...ALLOWED_BUILTIN_TOOLS],
+    // Único MCP: el bus del motor, en proceso. Nada de .mcp.json, ajustes de usuario ni
+    // conectores de claude.ai (Gmail, Drive…), que de otro modo llegan con la sesión del
+    // usuario. Ya no se usa `disallowedTools: ['mcp__*']` porque taparía el bus; cualquier
+    // otra herramienta MCP la deniegan el hook y canUseTool (lista `ALLOWED_TOOLS`).
+    mcpServers: options.busTools ? { [BUS_SERVER_NAME]: createBusMcpServer(options.busTools) } : {},
+    strictMcpConfig: true,
+    hooks: { PreToolUse: [{ hooks: [createPreToolUseHook(options.cwd)] }] },
+    canUseTool: createCanUseTool(options.cwd),
+    maxTurns: options.maxTurns,
+    maxBudgetUsd: options.maxBudgetUsd,
+    abortController,
+    // Sin ajustes de usuario/proyecto: sus reglas `allow` podrían saltarse canUseTool.
+    settingSources: [],
+    // Solo el entorno del proceso; el motor no agrega secretos propios.
+    env: { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: 'false' },
+    ...(options.resume ? { resume: options.resume } : {}),
+  }
+}
+
 /** Implementación real sobre `query()` del Claude Agent SDK. */
 export class SdkAgentRunner implements AgentRunner {
   /** `onMessage` recibe cada mensaje crudo del SDK (diagnóstico y grabación de fixtures). */
@@ -243,34 +288,7 @@ export class SdkAgentRunner implements AgentRunner {
   run(options: RunOptions): RunHandle {
     const abortController = new AbortController()
     options.signal.addEventListener('abort', () => abortController.abort(), { once: true })
-    const sdkOptions: Options = {
-      model: options.model,
-      cwd: options.cwd,
-      systemPrompt: {
-        type: 'preset',
-        preset: 'claude_code',
-        append: `${ROLE_PROMPTS[options.role]}\n${SECURITY_PROMPT}`,
-      },
-      permissionMode: 'default',
-      // Tres capas: solo existen las herramientas permitidas, el hook las revisa todas
-      // y canUseTool cubre lo que pida aprobación.
-      tools: [...ALLOWED_TOOLS],
-      // Ningún MCP: ni .mcp.json, ni ajustes de usuario, ni conectores de claude.ai
-      // (Gmail, Drive…), que de otro modo llegan al agente con la sesión del usuario.
-      mcpServers: {},
-      strictMcpConfig: true,
-      disallowedTools: ['mcp__*'],
-      hooks: { PreToolUse: [{ hooks: [createPreToolUseHook(options.cwd)] }] },
-      canUseTool: createCanUseTool(options.cwd),
-      maxTurns: options.maxTurns,
-      maxBudgetUsd: options.maxBudgetUsd,
-      abortController,
-      // Sin ajustes de usuario/proyecto: sus reglas `allow` podrían saltarse canUseTool.
-      settingSources: [],
-      // Solo el entorno del proceso; el motor no agrega secretos propios.
-      env: { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: 'false' },
-      ...(options.resume ? { resume: options.resume } : {}),
-    }
+    const sdkOptions = buildSdkOptions(options, abortController)
     const q = query({ prompt: options.prompt, options: sdkOptions })
     const state = createTranslateState()
     const onMessage = this.onMessage

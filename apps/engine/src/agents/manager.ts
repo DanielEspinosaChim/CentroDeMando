@@ -13,6 +13,9 @@ import {
   type StartTaskInput,
 } from '@cdm/shared'
 import type { FastifyBaseLogger } from 'fastify'
+import type { MessageBus } from '../bus/bus.ts'
+import { prependMessages, WAKE_PROMPT } from '../bus/delivery.ts'
+import { createBusTools } from '../bus/tools.ts'
 import type { EngineConfig } from '../config.ts'
 import {
   NO_ROUTING,
@@ -59,6 +62,8 @@ export const LIMIT_MESSAGES = {
 } as const
 export const BUDGET_EXHAUSTED_MESSAGE =
   'La sesión ya agotó el tope de costo por tarea; inicia una tarea nueva para continuar.'
+/** Estados desde los que un mensaje con `wake` lanza una tarea al momento (criterio C002-5). */
+const WAKEABLE_STATUSES: readonly AgentStatus[] = ['idle', 'done']
 /** Tiempo máximo que pausa/stop esperan a que el proceso del SDK termine; luego se fuerza el cierre. */
 const DRAIN_TIMEOUT_MS = 5000
 /** Tope por defecto de `idle()`: nunca se espera indefinidamente a los consumidores. */
@@ -138,6 +143,8 @@ export interface AgentManagerDeps {
   secrets?: readonly string[]
   /** Configuración vigente del enrutador (se lee en cada decisión). Por defecto, la de fábrica. */
   routerConfig?: RouterConfigSource
+  /** Bus de mensajes (feature 002). Sin él, los agentes no tienen herramientas de mensajes. */
+  bus?: MessageBus
 }
 
 export const RETRY_NOT_LAST_MESSAGE = 'Solo se puede reintentar la última ejecución del agente'
@@ -173,9 +180,14 @@ export class AgentManager {
   private readonly draining = new Map<string, LiveRun>()
   private readonly pending = new Set<Promise<void>>()
   private readonly routerConfig: RouterConfigSource
+  /** Durante el apagado no se lanzan despertares nuevos. */
+  private closing = false
 
   constructor(private readonly deps: AgentManagerDeps) {
     this.routerConfig = deps.routerConfig ?? staticRouterConfig()
+    deps.bus?.onWake((workspaceId, agentIds) => {
+      for (const agentId of agentIds) this.tryWake(workspaceId, agentId)
+    })
   }
 
   // --- CRUD -----------------------------------------------------------------
@@ -400,6 +412,7 @@ export class AgentManager {
    * drenando (pausas incluidas) y espera con tope para que Ctrl+C no se cuelgue.
    */
   async shutdown(): Promise<void> {
+    this.closing = true
     await Promise.allSettled(
       [...this.live.values()]
         .filter((live) => !live.ended)
@@ -411,6 +424,50 @@ export class AgentManager {
         { pending: this.pending.size },
         'apagado: quedaron ejecuciones sin terminar tras forzar su cierre',
       )
+    }
+  }
+
+  // --- Bus de mensajes (feature 002) ---------------------------------------------
+
+  /**
+   * Despertar automático: si el agente tiene mensajes `wake` pendientes y está `idle`/`done`,
+   * se le lanza una tarea para atenderlos. Si está ocupado (o no hay hueco de concurrencia),
+   * los mensajes siguen pendientes y se vuelve a intentar al terminar una ejecución. Nunca
+   * lanza: un despertar fallido no puede romper el envío ni la ejecución que lo provocó.
+   */
+  private tryWake(workspaceId: string, agentId: string): void {
+    const bus = this.deps.bus
+    if (!bus || this.closing) return
+    if (this.live.has(agentId) || this.draining.has(agentId)) return
+    if (this.activeCount() >= this.deps.config.maxConcurrentAgents) return
+    const agent = this.deps.store.getAgent(workspaceId, agentId)
+    if (!agent || !WAKEABLE_STATUSES.includes(agent.status)) return
+    if (!bus.agentsWithPendingWake(workspaceId).includes(agentId)) return
+    try {
+      const result = this.decide({ prompt: WAKE_PROMPT, role: agent.role, consecutiveFailures: 0 })
+      this.launch(workspaceId, agent, {
+        prompt: WAKE_PROMPT,
+        model: result.decision.model,
+        maxBudgetUsd: this.deps.config.maxCostUsdPerTask,
+        routed: { result, retryOfRunId: null, consecutiveFailures: 0 },
+      })
+    } catch (err) {
+      const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+      this.deps.logger.warn({ agentId, detail }, 'no se pudo despertar al agente')
+    }
+  }
+
+  /** Al terminar una ejecución: atiende la cola de despertares del workspace. */
+  private drainWakeQueue(workspaceId: string): void {
+    const bus = this.deps.bus
+    if (!bus || this.closing) return
+    try {
+      for (const agentId of bus.agentsWithPendingWake(workspaceId)) {
+        this.tryWake(workspaceId, agentId)
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+      this.deps.logger.warn({ detail }, 'fallo al atender la cola de despertares')
     }
   }
 
@@ -502,9 +559,25 @@ export class AgentManager {
     if (!resume) this.deps.store.setAgentSession(workspaceId, agent.id, null)
     this.deps.store.setAgentStatus(workspaceId, agent.id, 'thinking')
 
+    // Bus (feature 002): los pendientes se anteponen al prompt dentro del bloque marcado como
+    // datos y pasan a `delivered`. `run.prompt` guarda solo el prompt de la tarea (el que se
+    // reintenta y el que decide el enrutador), nunca el texto de otros agentes.
+    const bus = this.deps.bus
+    const delivery = bus?.deliverPending(workspaceId, agent.id)
+    const fullPrompt = delivery
+      ? prependMessages(prompt, delivery.messages, delivery.senders)
+      : prompt
+    const thread = { current: delivery?.context ?? null }
+    const busTools = bus
+      ? createBusTools(bus, workspaceId, agent.id, () => ({
+          runId: run.id,
+          context: thread.current,
+        }))
+      : undefined
+
     const abort = new AbortController()
     const handle = this.deps.runner.run({
-      prompt,
+      prompt: fullPrompt,
       model,
       role: agent.role,
       cwd,
@@ -512,6 +585,7 @@ export class AgentManager {
       maxBudgetUsd,
       signal: abort.signal,
       ...(resume ? { resume } : {}),
+      ...(busTools ? { busTools } : {}),
     })
     const live: LiveRun = { workspaceId, agentId: agent.id, run, handle, abort, status: 'thinking' }
     this.live.set(agent.id, live)
@@ -575,6 +649,9 @@ export class AgentManager {
       if (this.draining.get(live.agentId) === live) this.draining.delete(live.agentId)
       // La sesión del SDK queda en disco: cerrar el proceso no impide reanudarla.
       live.handle.close()
+      // Se libera un hueco: los mensajes `wake` que esperaban (de este agente si terminó en
+      // `done`, o de otros que no cabían) se atienden ahora.
+      this.drainWakeQueue(live.workspaceId)
     }
   }
 

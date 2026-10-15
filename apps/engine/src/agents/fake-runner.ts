@@ -1,3 +1,4 @@
+import type { BusToolName, BusToolResult } from '../bus/tools.ts'
 import {
   type AgentRunner,
   type RunHandle,
@@ -11,13 +12,16 @@ import {
  * - un `RunnerEvent` se emite tal cual;
  * - `wait` espera `ms` milisegundos;
  * - `hold` se queda esperando hasta `release()`, `interrupt()` o `close()`;
- * - `fail` hace fallar la ejecución con ese mensaje interno.
+ * - `fail` hace fallar la ejecución con ese mensaje interno;
+ * - `call` llama a una herramienta del bus (como haría el modelo vía MCP) y guarda el
+ *   resultado en `toolResults`; emite `tool` y `tool_result` como una herramienta real.
  */
 export type FakeStep =
   | RunnerEvent
   | { type: 'wait'; ms: number }
   | { type: 'hold' }
   | { type: 'fail'; message: string }
+  | { type: 'call'; tool: BusToolName; input: unknown }
 
 export type FakeScript = FakeStep[] | ((options: RunOptions, callIndex: number) => FakeStep[])
 
@@ -33,6 +37,8 @@ interface FakeRun {
   closed: boolean
   /** Eventos que el runner llegó a entregar. */
   emitted: RunnerEvent[]
+  /** Resultados de los pasos `call`, en orden. */
+  toolResults: BusToolResult[]
   release(): void
 }
 
@@ -73,6 +79,7 @@ export class FakeAgentRunner implements AgentRunner {
       interrupted: false,
       closed: false,
       emitted: [],
+      toolResults: [],
       release: () => wake?.(),
     }
     this.runs.push(state)
@@ -100,6 +107,23 @@ export class FakeAgentRunner implements AgentRunner {
           continue
         }
         if (step.type === 'fail') throw new RunnerError(step.message)
+        if (step.type === 'call') {
+          const toolUseId = `fake-tool-${state.toolResults.length + 1}`
+          const toolEvent: RunnerEvent = { type: 'tool', tool: `mcp__bus__${step.tool}`, toolUseId }
+          state.emitted.push(toolEvent)
+          yield toolEvent
+          state.toolResults.push(
+            options.busTools?.call(step.tool, step.input) ?? {
+              ok: false,
+              text: 'Sin herramientas del bus',
+            },
+          )
+          const resultEvent: RunnerEvent = { type: 'tool_result', toolUseId }
+          state.emitted.push(resultEvent)
+          yield resultEvent
+          await new Promise((r) => setImmediate(r))
+          continue
+        }
         state.emitted.push(step)
         yield step
         // Cede el turno como haría un proceso real entre mensajes.

@@ -9,7 +9,7 @@ opcional. Los números de feature (00X) corresponden a las carpetas en
 1. **[001-motor-de-agentes]** — Servicio local que lanza, pausa, reanuda y detiene
    agentes de Claude Code con el Agent SDK, y emite sus eventos en tiempo real.
    Todo lo demás se monta encima.
-2. **[002-bus-de-mensajes]** — Mensajería entre agentes (directa y a todos), con
+2. ✅ **[002-bus-de-mensajes]** — Mensajería entre agentes (directa y a todos), con
    bandeja por agente. Base de la coordinación y de lo que se dibuja en la UI.
 3. ✅ **[003-enrutador-de-modelos]** — Elige Haiku / Sonnet / Opus por tarea según
    tamaño y riesgo, con escalamiento automático y piso de seguridad. Explica cada

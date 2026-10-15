@@ -2,12 +2,14 @@ import websocket from '@fastify/websocket'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { AgentManager } from './agents/manager.ts'
 import type { AgentRunner } from './agents/runner.ts'
+import { MessageBus } from './bus/bus.ts'
 import type { EngineConfig } from './config.ts'
 import type { Store } from './db/store.ts'
 import { registerErrorHandler } from './errors/index.ts'
 import { EventHub } from './events/hub.ts'
 import { createRouterConfigStore, type RouterConfigStore } from './router/config-store.ts'
 import { agentRoutes } from './routes/agents.ts'
+import { messageRoutes } from './routes/messages.ts'
 import { projectRoutes } from './routes/projects.ts'
 import { routerRoutes } from './routes/router.ts'
 import { wsRoutes } from './routes/ws.ts'
@@ -33,6 +35,7 @@ export interface Engine {
   manager: AgentManager
   hub: EventHub
   routerConfig: RouterConfigStore
+  bus: MessageBus
 }
 
 export const BODY_LIMIT_BYTES = 128 * 1024
@@ -54,6 +57,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<Engine> {
   const routerConfig =
     opts.routerConfig ??
     createRouterConfigStore(opts.config.dataDir, { onWarning: (message) => app.log.warn(message) })
+  const bus = new MessageBus({ store: opts.store, hub })
   const manager = new AgentManager({
     store: opts.store,
     runner: opts.runner,
@@ -62,6 +66,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<Engine> {
     logger: app.log,
     secrets: [opts.token],
     routerConfig,
+    bus,
   })
 
   registerErrorHandler(app)
@@ -88,11 +93,12 @@ export async function buildServer(opts: BuildServerOptions): Promise<Engine> {
   projectRoutes(app, opts.store, opts.config.dataDir, limits)
   agentRoutes(app, manager, limits)
   routerRoutes(app, { store: opts.store, routerConfig }, limits)
+  messageRoutes(app, bus, limits)
   wsRoutes(app, hub, opts.token)
 
   app.addHook('onClose', async () => {
     await manager.shutdown()
   })
 
-  return { app, manager, hub, routerConfig }
+  return { app, manager, hub, routerConfig, bus }
 }
